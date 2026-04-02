@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  font-family: 'Inter', system-ui, sans-serif;
+  color-scheme: light;
+}
+
+#root {
+  height: 100%;
+  min-height: 100dvh;
+}
+
+/* Full-viewport light shell (web): soft tint at edges, main column is white */
+.saas-app-shell {
+  min-height: 100vh;
+  background: linear-gradient(
+    160deg,
+    #e8eef9 0%,
+    #eef6f0 35%,
+    #f3f0f7 70%,
+    #fce8f0 100%
+  );
+}
+
+/* Primary CTA gradient (Send / Floating) */
+.saas-cta-gradient {
+  background: linear-gradient(135deg, #ff5252 0%, #ec407a 55%, #e91e63 100%) !important;
+  border: none !important;
+  color: #fff !important;
+}
+.saas-cta-gradient:hover {
+  filter: brightness(1.06);
+  color: #fff !important;
+}
+
+/* Assistant markdown (react-markdown) */
+.cinemabot-markdown {
+  line-height: 1.75;
+  font-size: 14px;
+  color: #212121;
+}
+.cinemabot-markdown p {
+  margin: 0 0 0.5rem;
+}
+.cinemabot-markdown p:last-child {
+  margin-bottom: 0;
+}
+.cinemabot-markdown h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.75rem 0 0.35rem;
+  color: #1a1a1a;
+}
+.cinemabot-markdown h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0.6rem 0 0.25rem;
+}
+.cinemabot-markdown ul {
+  margin: 0.35rem 0 0.5rem;
+  padding-left: 1.25rem;
+}
+.cinemabot-markdown li {
+  margin-bottom: 0.15rem;
+}
+.cinemabot-markdown strong {
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+/* Timeline-style ordered lists (vertical pink rail + numbered circles) */
+.cinemabot-markdown ol {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 1rem 0.5rem;
+  counter-reset: saas-step;
+  border-left: 2px solid #f48fb1;
+  padding-left: 1.35rem;
+}
+.cinemabot-markdown ol li {
+  position: relative;
+  margin-bottom: 1rem;
+  padding-left: 0.15rem;
+}
+.cinemabot-markdown ol li::before {
+  counter-increment: saas-step;
+  content: counter(saas-step);
+  position: absolute;
+  left: -1.86rem;
+  top: 0.05rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  line-height: 1.5rem;
+  text-align: center;
+  background: #ec407a;
+  color: #fff;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 700;
+  box-shadow: 0 2px 6px rgba(236, 64, 122, 0.35);
+}
+
+/* Composer quick pills */
+.saas-quick-pill {
+  border-radius: 999px !important;
+  background: #f5f5f5 !important;
+  border: 1px solid #eeeeee !important;
+  color: #424242 !important;
+  font-weight: 500 !important;
+}
+.saas-quick-pill:hover {
+  border-color: #f48fb1 !important;
+  color: #ad1457 !important;
+}
+
+/* Floating scroll CTA — coral gradient */
+.saas-float-cta .ant-float-btn-body {
+  background: linear-gradient(135deg, #ff5252 0%, #ec407a 100%) !important;
+  color: #fff !important;
+}
+.saas-float-cta .ant-float-btn-body:hover {
+  color: #fff !important;
+}

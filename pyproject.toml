@@ -1,0 +1,9 @@
+[project]
+name = "movie-agent"
+version = "1.0.0"
+description = "AI-powered movie agent built with FastAPI and LangChain (Ollama)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
