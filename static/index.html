@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CinemaBot — AI Movie Agent</title>
+    <meta name="description" content="CinemaBot is an intelligent AI movie agent powered by LangChain and Ollama. Search, explore, and discover movies in real time.">
+    <script>
+        (function () {
+            var k = 'cinemabot-theme';
+            var v = localStorage.getItem(k);
+            var root = document.documentElement;
+            if (v === 'light') { root.dataset.theme = 'light'; root.setAttribute('data-theme', 'light'); }
+            else if (v === 'dark') { root.dataset.theme = 'dark'; root.setAttribute('data-theme', 'dark'); }
+            else { root.dataset.theme = 'light'; root.setAttribute('data-theme', 'light'); }
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+
+        html[data-theme="light"] {
+            --bg-base: #eef0f7;
+            --bg-mid: #e4e8f4;
+            --bg-deep: #dce3f2;
+            --blob-1: rgba(139, 92, 246, 0.14);
+            --blob-2: rgba(59, 130, 246, 0.11);
+            --blob-3: rgba(236, 72, 153, 0.07);
+            --surface: rgba(255, 255, 255, 0.94);
+            --glass-bg: rgba(255, 255, 255, 0.72);
+            --glass-dark-bg: rgba(255, 255, 255, 0.55);
+            --text: #0f172a;
+            --text-muted: #475569;
+            --text-subtle: #64748b;
+            --border: rgba(15, 23, 42, 0.08);
+            --border-glass: rgba(15, 23, 42, 0.1);
+            --accent: #6d28d9;
+            --accent-bright: #7c3aed;
+            --accent-muted: #7c3aed;
+            --accent-soft: rgba(124, 58, 237, 0.14);
+            --accent-soft-border: rgba(124, 58, 237, 0.28);
+            --accent-glow: rgba(124, 58, 237, 0.2);
+            --header-bg: linear-gradient(90deg, rgba(139, 92, 246, 0.1) 0%, rgba(59, 130, 246, 0.1) 100%);
+            --header-border: rgba(124, 58, 237, 0.22);
+            --header-title: #0f172a;
+            --header-subline: #5b21b6;
+            --bot-bubble-bg: var(--surface);
+            --bot-bubble-border: var(--border);
+            --bot-bubble-shadow: 0 4px 24px rgba(15, 23, 42, 0.06);
+            --bot-text: #1e293b;
+            --bot-avatar-glow: 0 4px 20px rgba(139, 92, 246, 0.35);
+            --status-bg: var(--accent-soft);
+            --status-border: var(--accent-soft-border);
+            --status-text: #5b21b6;
+            --status-glow: rgba(124, 58, 237, 0.25);
+            --loader-bar: linear-gradient(180deg, #7c3aed, #2563eb);
+            --shimmer-a: rgba(15, 23, 42, 0.04);
+            --shimmer-b: rgba(15, 23, 42, 0.1);
+            --shimmer-c: rgba(15, 23, 42, 0.04);
+            --input-bg: var(--surface);
+            --input-border: var(--accent-soft-border);
+            --input-focus-ring: rgba(124, 58, 237, 0.18);
+            --input-text: #0f172a;
+            --input-placeholder: rgba(15, 23, 42, 0.38);
+            --scrollbar-thumb: rgba(124, 58, 237, 0.35);
+            --markdown-body: #334155;
+            --markdown-strong: #0f172a;
+            --markdown-em: #6d28d9;
+            --markdown-heading: #0f172a;
+            --feedback-divider: rgba(15, 23, 42, 0.08);
+            --fb-icon: rgba(15, 23, 42, 0.45);
+            --fb-bg: rgba(15, 23, 42, 0.04);
+            --fb-border: rgba(15, 23, 42, 0.1);
+            --text-error: #b91c1c;
+            --text-stopped: #64748b;
+        }
+
+        html[data-theme="dark"] {
+            --bg-base: #0f0c1a;
+            --bg-mid: #1a1030;
+            --bg-deep: #0d1a2e;
+            --blob-1: rgba(139, 92, 246, 0.22);
+            --blob-2: rgba(59, 130, 246, 0.16);
+            --blob-3: rgba(236, 72, 153, 0.1);
+            --surface: rgba(255, 255, 255, 0.06);
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --glass-dark-bg: rgba(0, 0, 0, 0.3);
+            --text: #e2e8f0;
+            --text-muted: #94a3b8;
+            --text-subtle: rgba(255, 255, 255, 0.45);
+            --border: rgba(255, 255, 255, 0.1);
+            --border-glass: rgba(255, 255, 255, 0.1);
+            --accent: #a78bfa;
+            --accent-bright: #c4b5fd;
+            --accent-muted: #a78bfa;
+            --accent-soft: rgba(139, 92, 246, 0.15);
+            --accent-soft-border: rgba(139, 92, 246, 0.3);
+            --accent-glow: rgba(139, 92, 246, 0.35);
+            --header-bg: linear-gradient(90deg, rgba(139, 92, 246, 0.15) 0%, rgba(59, 130, 246, 0.15) 100%);
+            --header-border: rgba(139, 92, 246, 0.3);
+            --header-title: #ffffff;
+            --header-subline: #a78bfa;
+            --bot-bubble-bg: rgba(255, 255, 255, 0.06);
+            --bot-bubble-border: rgba(255, 255, 255, 0.1);
+            --bot-bubble-shadow: none;
+            --bot-text: #e2e8f0;
+            --bot-avatar-glow: 0 0 20px rgba(139, 92, 246, 0.4);
+            --status-bg: rgba(139, 92, 246, 0.15);
+            --status-border: rgba(139, 92, 246, 0.3);
+            --status-text: #a78bfa;
+            --status-glow: rgba(139, 92, 246, 0.35);
+            --loader-bar: linear-gradient(180deg, #8b5cf6, #3b82f6);
+            --shimmer-a: rgba(255, 255, 255, 0.03);
+            --shimmer-b: rgba(255, 255, 255, 0.08);
+            --shimmer-c: rgba(255, 255, 255, 0.03);
+            --input-bg: rgba(255, 255, 255, 0.05);
+            --input-border: rgba(139, 92, 246, 0.3);
+            --input-focus-ring: rgba(139, 92, 246, 0.15);
+            --input-text: #e2e8f0;
+            --input-placeholder: rgba(255, 255, 255, 0.25);
+            --scrollbar-thumb: rgba(139, 92, 246, 0.3);
+            --markdown-body: #cbd5e1;
+            --markdown-strong: #e2e8f0;
+            --markdown-em: #a78bfa;
+            --markdown-heading: #e2e8f0;
+            --feedback-divider: rgba(255, 255, 255, 0.07);
+            --fb-icon: rgba(255, 255, 255, 0.4);
+            --fb-bg: rgba(255, 255, 255, 0.05);
+            --fb-border: rgba(255, 255, 255, 0.12);
+            --text-error: #f87171;
+            --text-stopped: #94a3b8;
+        }
+
+        body {
+            background: linear-gradient(135deg, var(--bg-base) 0%, var(--bg-mid) 50%, var(--bg-deep) 100%);
+            min-height: 100vh;
+            position: relative;
+            isolation: isolate;
+            color: var(--text);
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: -25%;
+            z-index: -1;
+            background:
+                radial-gradient(ellipse 85% 65% at 18% 28%, var(--blob-1), transparent 52%),
+                radial-gradient(ellipse 75% 55% at 82% 72%, var(--blob-2), transparent 48%),
+                radial-gradient(ellipse 65% 45% at 48% 92%, var(--blob-3), transparent 42%);
+            animation: bg-drift 26s ease-in-out infinite alternate;
+            pointer-events: none;
+            will-change: transform;
+        }
+
+        body.agent-busy::before {
+            animation-duration: 16s;
+        }
+
+        @keyframes bg-drift {
+            0%   { transform: translate(0, 0) scale(1); }
+            100% { transform: translate(1.5%, -1.5%) scale(1.04); }
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb {
+            background: var(--scrollbar-thumb);
+            border-radius: 10px;
+        }
+
+        /* ── Glassmorphism card ── */
+        .glass {
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-glass);
+        }
+        .glass-dark {
+            background: var(--glass-dark-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-glass);
+        }
+
+        /* ── Header ── */
+        .header-glow {
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--header-border);
+            backdrop-filter: blur(20px);
+        }
+        .header-title { color: var(--header-title); }
+        .header-subtitle { color: var(--header-subline); }
+
+        /* ── Avatar gradient ── */
+        .bot-avatar {
+            background: linear-gradient(135deg, #8b5cf6, #3b82f6);
+            box-shadow: var(--bot-avatar-glow);
+        }
+        .user-avatar { background: linear-gradient(135deg, #f59e0b, #ef4444); }
+
+        /* ── Message bubbles ── */
+        .bot-bubble {
+            background: var(--bot-bubble-bg);
+            border: 1px solid var(--bot-bubble-border);
+            color: var(--bot-text);
+            box-shadow: var(--bot-bubble-shadow);
+        }
+        .user-bubble {
+            background: linear-gradient(135deg, #7c3aed, #2563eb);
+            border: 1px solid rgba(139, 92, 246, 0.45);
+            color: #fff;
+            box-shadow: 0 4px 20px rgba(124, 58, 237, 0.35);
+        }
+
+        .welcome-text { color: var(--bot-text); line-height: 1.65; }
+        .welcome-text strong { color: var(--markdown-strong); font-weight: 600; }
+        .footer-credit { color: var(--text-subtle); }
+
+        /* ── Status pill ── */
+        .status-pill {
+            background: var(--status-bg);
+            border: 1px solid var(--status-border);
+            color: var(--status-text);
+            border-radius: 999px;
+            padding: 4px 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: opacity 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;
+        }
+
+        .status-pill:not(.hidden) {
+            animation: status-enter 0.28s ease both;
+        }
+
+        @keyframes status-enter {
+            from { opacity: 0; transform: translateY(-4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        body.agent-busy .status-pill:not(.hidden) {
+            animation: status-enter 0.28s ease both, status-pulse 2.2s ease-in-out 0.3s infinite;
+        }
+
+        @keyframes status-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 transparent; }
+            50%      { box-shadow: 0 0 0 3px var(--status-glow), 0 0 18px var(--status-glow); }
+        }
+
+        /* ── Cinematic Loader ── */
+        .cinema-loader {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        body.agent-busy .cinema-loader .bar {
+            animation-duration: 0.85s;
+        }
+        .cinema-loader .bar {
+            width: 3px;
+            border-radius: 10px;
+            background: var(--loader-bar);
+            animation: cinema-bar 1.2s ease-in-out infinite;
+        }
+        .cinema-loader .bar:nth-child(1) { height: 14px; animation-delay: 0s; }
+        .cinema-loader .bar:nth-child(2) { height: 20px; animation-delay: .15s; }
+        .cinema-loader .bar:nth-child(3) { height: 28px; animation-delay: .3s; }
+        .cinema-loader .bar:nth-child(4) { height: 20px; animation-delay: .45s; }
+        .cinema-loader .bar:nth-child(5) { height: 14px; animation-delay: .6s; }
+        @keyframes cinema-bar {
+            0%, 100% { transform: scaleY(.4); opacity: .4; }
+            50%       { transform: scaleY(1);   opacity: 1;   }
+        }
+
+        /* ── Shimmer placeholder ── */
+        .shimmer {
+            background: linear-gradient(90deg,
+                var(--shimmer-a) 25%,
+                var(--shimmer-b) 50%,
+                var(--shimmer-c) 75%);
+            background-size: 400% 100%;
+            animation: shimmer 1.35s infinite;
+            border-radius: 6px;
+            height: 14px;
+        }
+        body.agent-busy .shimmer { animation-duration: 0.95s; }
+        @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+        /* ── Input box ── */
+        .input-box {
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 16px;
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+            transition: border-color .2s, box-shadow .2s;
+        }
+        html[data-theme="dark"] .input-box { box-shadow: none; }
+
+        .input-box:focus-within {
+            border-color: var(--accent-muted);
+            box-shadow: 0 0 0 3px var(--input-focus-ring);
+        }
+        textarea {
+            background: transparent;
+            color: var(--input-text);
+            resize: none;
+            outline: none;
+        }
+        textarea::placeholder { color: var(--input-placeholder); }
+
+        /* ── Send button ── */
+        #send-btn {
+            background: linear-gradient(135deg, #7c3aed, #2563eb);
+            border: none;
+            transition: transform .15s, box-shadow .15s;
+        }
+        #send-btn:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.45);
+        }
+        #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+        /* ── Stop button ── */
+        #stop-btn {
+            background: linear-gradient(135deg, #dc2626, #9f1239);
+            border: none;
+            transition: transform .15s, box-shadow .15s, opacity .2s;
+        }
+        #stop-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(220, 38, 38, 0.45); }
+
+        /* ── Feedback buttons ── */
+        .feedback-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid var(--feedback-divider);
+        }
+        .feedback-label { color: var(--text-subtle); }
+        .fb-btn {
+            width: 30px; height: 30px;
+            border-radius: 8px;
+            border: 1px solid var(--fb-border);
+            background: var(--fb-bg);
+            color: var(--fb-icon);
+            cursor: pointer;
+            transition: all .2s;
+            display: flex; align-items: center; justify-content: center;
+            font-size: .85rem;
+        }
+        .fb-btn:hover {
+            border-color: var(--accent-soft-border);
+            color: var(--accent-muted);
+            background: var(--accent-soft);
+            transform: scale(1.1);
+        }
+        .fb-btn.liked  { background: rgba(34, 197, 94, 0.2);  border-color: rgba(34, 197, 94, 0.5);  color: #4ade80; }
+        .fb-btn.disliked { background: rgba(239, 68, 68, 0.2); border-color: rgba(239, 68, 68, 0.5); color: #f87171; }
+
+        /* ── Markdown inside bubbles ── */
+        .markdown-body { color: var(--markdown-body); line-height: 1.75; }
+        .markdown-body strong { color: var(--markdown-strong); font-weight: 600; }
+        .markdown-body em { color: var(--markdown-em); }
+        .markdown-body ul { list-style: disc; margin-left: 1.5rem; margin-top: .4rem; margin-bottom: .4rem; }
+        .markdown-body li { margin-bottom: .2rem; }
+        .markdown-body p { margin-bottom: .6rem; }
+        .markdown-h2 {
+            color: var(--markdown-heading);
+            font-weight: 600;
+            margin: 1rem 0 .35rem;
+            font-size: 1rem;
+        }
+        .markdown-h3 {
+            color: var(--markdown-heading);
+            font-weight: 600;
+            margin: .75rem 0 .25rem;
+            font-size: 0.875rem;
+        }
+        .markdown-ul { list-style: disc; margin-left: 1.25rem; margin-top: .5rem; margin-bottom: .5rem; }
+        .markdown-ul li { margin-bottom: .15rem; }
+
+        .text-error { color: var(--text-error); }
+        .text-stopped { color: var(--text-stopped); font-size: 0.75rem; }
+
+        /* ── Scroll button ── */
+        #scroll-bottom-btn {
+            background: var(--accent-soft);
+            border: 1px solid var(--accent-soft-border);
+            color: var(--accent-muted);
+            transition: all .2s;
+        }
+        #scroll-bottom-btn:hover { background: var(--accent-glow); }
+
+        /* ── New chat + theme toggle ── */
+        #new-chat-btn,
+        #theme-toggle {
+            background: var(--accent-soft);
+            border: 1px solid var(--accent-soft-border);
+            color: var(--accent-muted);
+            border-radius: 10px;
+            transition: all .2s;
+        }
+        #new-chat-btn:hover,
+        #theme-toggle:hover {
+            background: var(--accent-glow);
+            border-color: var(--accent-muted);
+        }
+        #theme-toggle i,
+        #theme-toggle svg {
+            pointer-events: none;
+        }
+
+        /* ── Pulse dot ── */
+        @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+        .pulse-dot { animation: pulse-dot 1.5s infinite; }
+
+        /* ── Fade-in for messages ── */
+        @keyframes fade-up {
+            from { opacity: 0; transform: translateY(10px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .msg-appear { animation: fade-up .3s ease both; }
+    </style>
+</head>
+<body class="h-screen flex flex-col antialiased">
+
+    <!-- Header -->
+    <header class="header-glow shrink-0 z-10">
+        <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="bot-avatar w-10 h-10 rounded-xl flex items-center justify-center text-white shadow-lg">
+                    <i class="fa-solid fa-film text-lg"></i>
+                </div>
+                <div>
+                    <h1 class="header-title text-base font-bold tracking-tight leading-none">CinemaBot</h1>
+                    <p class="header-subtitle text-xs font-medium flex items-center gap-1.5 mt-0.5">
+                        <span class="w-1.5 h-1.5 rounded-full bg-green-400 pulse-dot"></span>
+                        AI Movie Agent Online
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <button type="button" id="theme-toggle" class="w-10 h-10 shrink-0 flex items-center justify-center" title="Switch theme" aria-label="Switch theme">
+                    <i class="fa-solid fa-sun text-sm" id="theme-toggle-icon"></i>
+                </button>
+                <button type="button" id="new-chat-btn" class="px-3 py-2 text-sm font-medium flex items-center gap-2">
+                    <i class="fa-solid fa-plus text-xs"></i> New Chat
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Chat area -->
+    <main class="flex-1 overflow-hidden flex flex-col max-w-4xl mx-auto w-full relative">
+        <div id="chat-messages" class="flex-1 overflow-y-auto px-4 py-6 space-y-5">
+
+            <!-- Welcome message -->
+            <div class="flex gap-3 max-w-[88%] msg-appear">
+                <div class="bot-avatar w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0 mt-1">
+                    <i class="fa-solid fa-robot text-xs"></i>
+                </div>
+                <div class="bot-bubble px-5 py-4 rounded-2xl rounded-tl-sm leading-relaxed">
+                    <p class="welcome-text text-sm">Hi there! 👋 I'm <strong>CinemaBot</strong>. Ask me anything about movies — search, details, recommendations, trivia. Let's roll! 🎬</p>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Scroll to bottom -->
+        <div id="scroll-bottom-btn" class="hidden absolute bottom-28 right-6 w-9 h-9 rounded-full cursor-pointer flex items-center justify-center z-10 shadow-lg">
+            <i class="fa-solid fa-arrow-down text-sm"></i>
+        </div>
+
+        <!-- Input area -->
+        <div class="shrink-0 px-4 pb-5 pt-2">
+            <div class="input-box p-2 flex items-end gap-2">
+                <textarea
+                    id="chat-input"
+                    rows="1"
+                    placeholder="Ask about a movie…"
+                    class="w-full border-none py-3 px-3 min-h-[48px] max-h-36 m-0 text-sm"
+                ></textarea>
+
+                <!-- Stop button — only visible while streaming -->
+                <button id="stop-btn" class="hidden w-11 h-11 shrink-0 text-white rounded-xl flex items-center justify-center shadow-md mb-0.5">
+                    <i class="fa-solid fa-stop text-sm"></i>
+                </button>
+
+                <button id="send-btn" class="w-11 h-11 shrink-0 text-white rounded-xl flex items-center justify-center shadow-md mb-0.5">
+                    <i class="fa-solid fa-paper-plane text-sm"></i>
+                </button>
+            </div>
+            <p class="footer-credit text-center mt-2 text-xs">
+                Powered by LangGraph · LangChain · OMDb · Redis
+            </p>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
