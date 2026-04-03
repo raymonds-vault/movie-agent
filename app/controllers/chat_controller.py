@@ -130,3 +130,25 @@ async def submit_feedback(
     """Mark a message as liked/disliked."""
     message = await service.submit_feedback(message_id, request.is_liked)
     return {"status": "success", "message_id": message.id, "is_liked": message.is_liked}
+
+
+@router.get("/analytics/tool-usage", summary="Tool usage analytics")
+async def tool_usage_stats(
+    tool_name: str | None = None,
+    service: ChatService = Depends(_get_chat_service),
+) -> list[dict]:
+    return await service.get_tool_usage_stats(tool_name=tool_name)
+
+
+@router.get("/analytics/run-failures", summary="Run step failure breakdown")
+async def run_failure_breakdown(
+    service: ChatService = Depends(_get_chat_service),
+) -> list[dict]:
+    return await service.get_run_failure_breakdown()
+
+
+@router.get("/analytics/cache-decisions", summary="Semantic cache decision stats")
+async def cache_decision_stats(
+    service: ChatService = Depends(_get_chat_service),
+) -> list[dict]:
+    return await service.get_cache_decision_stats()

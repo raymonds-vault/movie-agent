@@ -25,11 +25,12 @@ Client (React + WS)
       -> ChatService
          -> Redis semantic cache (+ optional LLM verifier)
          -> LangGraph agent pipeline
-             summarize_history
-             -> optimize_prompt
-             -> tools_phase <-> ToolNode(OMDb tools)
+             context_builder (conditional summary + optimize)
+             -> tools_decision (single pass)
+             -> optional tool_executor (ToolNode)
              -> synthesizer
-             -> quality_eval
+             -> eval_gate (rule-first)
+             -> optional quality_eval (LLM judge)
              -> (retry synthesizer with fallback model OR accept)
          -> persist messages + optional Redis write-back
       -> Repositories (SQLAlchemy async/MySQL)
@@ -52,11 +53,11 @@ Client (React + WS)
    - if acceptable: return cached answer immediately
    - else: continue to graph
 5. Graph executes:
-   - summarize recent history into compact memory
-   - optimize prompt for low-token routing
-   - run tool-calling phase and OMDb tools
+   - context builder (summary only when needed + prompt optimization)
+   - single-pass tool decision + optional tool execution
    - synthesize user-facing response
-   - evaluate response quality
+   - fast rule-based eval gate
+   - conditional LLM quality evaluation only on low-confidence cases
    - if low quality and retries remain: regenerate with fallback model
 6. Final response is persisted and streamed to UI.
 7. Response can be regenerated from UI (same last user message, same conversation).
@@ -65,39 +66,30 @@ Client (React + WS)
 
 ```text
 START
-  -> summarize_history
-  -> optimize_prompt
-  -> tools_phase
-      -> if tool calls present: tools -> tools_phase
+  -> context_builder
+  -> tools_decision
+      -> if tool call exists: tool_executor -> synthesizer
       -> else: synthesizer
-  -> quality_eval
-      -> if score >= QUALITY_MIN_SCORE: END
-      -> else if synthesis_pass_count < MAX_SYNTHESIS_PASSES: synthesizer
-      -> else: END
+  -> eval_gate
+      -> if rule pass: END
+      -> else: quality_eval
+          -> if score >= QUALITY_MIN_SCORE: END
+          -> else if synthesis_pass_count < MAX_SYNTHESIS_PASSES: synthesizer
+          -> else: END
 ```
 
 ## Technical Reference: Agent Nodes
 
-### `summarize_history(state, config)`
+### `context_builder(state, config)`
 - File: `app/services/agent/agent.py`
-- Uses: `SUMMARY_HISTORY_PROMPT` + base model
-- Input: `raw_history` (recent DB messages)
-- Output: `history_summary` (2-4 sentence compact memory)
-- Goal: reduce prompt size and preserve context quality
+- Optionally summarizes only when history is above threshold.
+- Always emits an optimized task instruction before downstream reasoning.
 
-### `optimize_prompt(state, config)`
-- Uses: `OPTIMIZE_PRE_LLM_PROMPT`
-- Inputs: `history_summary`, `user_query`, `feedback_context`
-- Output: `optimized_prompt`
-- Goal: convert vague follow-ups into explicit, short task instructions before tool/LLM steps
+### `tools_decision(state, config)`
+- Single-pass tool reasoning (`bind_tools`) with no recursive tool loop by default.
+- Emits zero or one tool actions.
 
-### `tools_phase(state, config)`
-- Uses: `ChatOllama(...).bind_tools(ALL_TOOLS)` + `TOOLS_PHASE_SYSTEM_PROMPT`
-- First iteration input: summary + optimized task + latest message
-- Loops with `ToolNode(ALL_TOOLS)` while `AIMessage.tool_calls` exist
-- Guard: `MAX_TOOL_PHASE_ROUNDS = 8`
-
-### `tools` (LangGraph `ToolNode`)
+### `tool_executor` (LangGraph `ToolNode`)
 - Executes registered async tools:
   - `search_movies(query)`
   - `get_movie_details(imdb_id)`
@@ -115,8 +107,12 @@ START
   - first pass: `OLLAMA_MODEL`
   - retry pass: `OLLAMA_SYNTH_FALLBACK_MODEL` or `OLLAMA_CODE_MODEL`
 
-### `quality_eval(state, config)`
-- Calls shared helper `evaluate_answer_quality(...)`
+### `eval_gate(state, config)`
+- Rule-first confidence gate (empty/too-short/missing tool-evidence checks).
+- Invokes expensive quality LLM only when necessary.
+
+### `quality_eval(state, config)` (conditional)
+- Calls shared helper `evaluate_answer_quality(...)` only after `eval_gate` asks for it
 - Output: `quality_score`, `quality_feedback`
 - Route rules:
   - accept if score >= `QUALITY_MIN_SCORE`
@@ -146,8 +142,21 @@ START
 
 ### `MessageRepository` (`app/repositories/conversation_repo.py`)
 - `get_recent_by_conversation(...)` for rolling context
+- `get_conversation_context(conversation_id, token_limit)` for token-budgeted context reads
 - `get_latest_user_message(conversation_id)` for regenerate
 - `add_message(...)`, `set_message_feedback(...)`, `get_liked_messages(...)`
+
+### Agent-run repositories (`app/repositories/agent_run_repo.py`)
+- `AgentRunRepository`:
+  - `create_run(...)` / `finalize_run(...)`
+  - `add_step(...)`, `add_tool_call(...)`, `add_quality_evaluation(...)`
+  - analytics reads: `get_tool_usage_stats(...)`, `get_run_failure_breakdown(...)`
+- `CacheAuditRepository`:
+  - `log_decision(...)`
+  - `decision_stats()`
+- `ConversationSummaryRepository`:
+  - `get_latest(...)`
+  - `upsert_next(...)`
 
 ### Trace helpers (`app/services/agent/trace_events.py`)
 - `build_agent_run_config(...)` -> tags + metadata + callbacks
@@ -165,6 +174,9 @@ START
 | `DELETE` | `/api/v1/chat/{conversation_id}` | Delete conversation |
 | `POST` | `/api/v1/chat/message/{message_id}/feedback` | Like/dislike assistant message |
 | `WS` | `/api/v1/chat/ws` | Streaming chat + regenerate (`regenerate: true`) |
+| `GET` | `/api/v1/chat/analytics/tool-usage` | Tool usage and latency aggregates |
+| `GET` | `/api/v1/chat/analytics/run-failures` | Node/step status breakdown |
+| `GET` | `/api/v1/chat/analytics/cache-decisions` | Cache hit/reject/miss stats |
 
 ### Movies
 | Method | Endpoint | Description |
@@ -184,11 +196,31 @@ From `requirements.txt`:
 - `pydantic-settings` -> environment-driven config
 - `python-dotenv` -> local env loading
 
+## Persistence Model (Data-Layer-First)
+
+New intelligence tables:
+- `agent_runs` -> one row per request path (`graph`, `cache`, `regenerate`)
+- `agent_run_steps` -> node/event lifecycle snapshots
+- `tool_calls` -> normalized tool execution rows
+- `quality_evaluations` -> shared quality gate outputs
+- `cache_decisions` -> auditable cache acceptance/rejection logs
+- `conversation_summaries` -> rolling summary snapshots (versioned)
+
+CQRS-style Redis projections:
+- `proj:conversation:{id}:context` -> latest summary + latest run quality
+- `proj:run:{id}` -> compact run status/progress snapshot
+
 ## Environment Configuration (Key Runtime Flags)
 
 ```bash
 # Base model
 OLLAMA_MODEL=llama3.1
+
+# Per-step model routing (optional)
+OLLAMA_CONTEXT_MODEL=
+OLLAMA_TOOL_DECISION_MODEL=
+OLLAMA_SYNTH_MODEL=
+OLLAMA_QUALITY_MODEL=
 
 # Retry model when quality fails
 OLLAMA_SYNTH_FALLBACK_MODEL=
@@ -197,6 +229,10 @@ OLLAMA_CODE_MODEL=deepseek-coder
 # Quality controls
 QUALITY_MIN_SCORE=6
 MAX_SYNTHESIS_PASSES=2
+
+# Conditional summary/eval controls
+HISTORY_SUMMARY_MIN_MESSAGES=8
+QUALITY_RULE_MIN_CHARS=40
 
 # Semantic cache verification
 SEMANTIC_CACHE_VERIFY=true

@@ -30,6 +30,7 @@ AsyncSessionLocal = async_sessionmaker(
 
 async def init_db() -> None:
     """Create all tables on startup."""
+    import app.models  # noqa: F401
     from app.models.base import Base  # noqa: F811
 
     async with engine.begin() as conn:

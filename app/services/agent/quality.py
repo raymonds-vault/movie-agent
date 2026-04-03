@@ -1,9 +1,9 @@
-"""Shared quality evaluation for cache hits, tool pipeline, and regenerated answers."""
+"""Shared quality evaluation for cache hits, graph answers, and regenerate flow."""
 
 from __future__ import annotations
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
 
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -13,11 +13,36 @@ logger = get_logger(__name__)
 
 
 def _quality_llm(settings: Settings) -> ChatOllama:
+    model = (settings.OLLAMA_QUALITY_MODEL or "").strip() or settings.OLLAMA_MODEL
     return ChatOllama(
-        model=settings.OLLAMA_MODEL,
+        model=model,
         base_url=settings.OLLAMA_BASE_URL,
         temperature=0.0,
     )
+
+
+def should_run_llm_quality_eval(
+    settings: Settings,
+    *,
+    user_query: str,
+    draft_response: str,
+    tool_calls_made: list[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    Fast rule gate:
+    - skip expensive quality eval on obviously adequate answers
+    - trigger eval when confidence is low
+    """
+    text = (draft_response or "").strip()
+    if not text:
+        return True, "empty_response"
+    if len(text) < settings.QUALITY_RULE_MIN_CHARS:
+        return True, "too_short"
+    q = (user_query or "").lower()
+    needs_tools = any(k in q for k in ["recommend", "movie", "details", "imdb", "search"])
+    if needs_tools and not (tool_calls_made or []):
+        return True, "missing_tool_evidence"
+    return False, "rule_pass"
 
 
 async def evaluate_answer_quality(

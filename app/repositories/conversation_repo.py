@@ -72,6 +72,26 @@ class MessageRepository(BaseRepository[Message]):
         rows.reverse()
         return rows
 
+    async def get_conversation_context(
+        self, conversation_id: str, token_limit: int = 1200
+    ) -> list[Message]:
+        """
+        Context-focused reader: pulls recent turns and trims by an approximate token budget.
+        Uses ~4 chars/token approximation to stay lightweight without tokenizer dependency.
+        """
+        rows = await self.get_recent_by_conversation(conversation_id, limit=60)
+        budget_chars = max(200, token_limit * 4)
+        picked: list[Message] = []
+        used = 0
+        for m in reversed(rows):  # newest to oldest while filling budget
+            size = len(m.content or "")
+            if used + size > budget_chars and picked:
+                break
+            picked.append(m)
+            used += size
+        picked.reverse()
+        return picked
+
     async def add_message(
         self,
         conversation_id: str,

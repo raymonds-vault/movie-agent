@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     OLLAMA_CODE_MODEL: str = "deepseek-coder"
     # Second synthesis pass when quality check fails (defaults to code model if unset).
     OLLAMA_SYNTH_FALLBACK_MODEL: str = ""
+    # Step-specific model routing for latency/quality trade-offs.
+    OLLAMA_CONTEXT_MODEL: str = ""
+    OLLAMA_TOOL_DECISION_MODEL: str = ""
+    OLLAMA_SYNTH_MODEL: str = ""
+    OLLAMA_QUALITY_MODEL: str = ""
 
     # ── OMDb ─────────────────────────────────────────
     OMDB_API_KEY: str = ""
@@ -49,6 +54,10 @@ class Settings(BaseSettings):
     QUALITY_MIN_SCORE: int = 6
     # Max synthesis runs per request (initial + retries after failed quality).
     MAX_SYNTHESIS_PASSES: int = 2
+    # Conditional summarization threshold.
+    HISTORY_SUMMARY_MIN_MESSAGES: int = 8
+    # Rule-based quality gate threshold before invoking LLM quality eval.
+    QUALITY_RULE_MIN_CHARS: int = 40
 
     # ── Langfuse (local Docker or cloud) ──────────────
     # https://langfuse.com/docs — never commit keys.
