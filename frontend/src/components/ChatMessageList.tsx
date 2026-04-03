@@ -4,6 +4,7 @@ import {
   DislikeOutlined,
   LikeOutlined,
   LoadingOutlined,
+  ReloadOutlined,
   RobotOutlined,
 } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
@@ -18,12 +19,19 @@ export interface ChatMessageListProps {
   messages: ChatMessage[]
   onScrollState?: (nearBottom: boolean) => void
   scrollToBottomSignal?: number
+  /** Re-run the last user message (same conversation). */
+  onRegenerate?: () => void
+  canRegenerate?: boolean
+  lastAssistantId?: string | null
 }
 
 export function ChatMessageList({
   messages,
   onScrollState,
   scrollToBottomSignal = 0,
+  onRegenerate,
+  canRegenerate,
+  lastAssistantId,
 }: ChatMessageListProps) {
   const { message: antMessage } = App.useApp()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -131,7 +139,7 @@ export function ChatMessageList({
                 </div>
               ) : null}
               {m.messageId && m.content && !m.error && !m.stopped ? (
-                <div className="flex items-center gap-1 mt-3 pt-2 border-t border-pink-50">
+                <div className="flex items-center flex-wrap gap-1 mt-3 pt-2 border-t border-pink-50">
                   <Button
                     type="text"
                     size="small"
@@ -161,6 +169,19 @@ export function ChatMessageList({
                     icon={<CopyOutlined />}
                     onClick={() => copyText(m.content)}
                   />
+                  {canRegenerate &&
+                  onRegenerate &&
+                  lastAssistantId === m.id ? (
+                    <Button
+                      type="text"
+                      size="small"
+                      className="!text-gray-500"
+                      icon={<ReloadOutlined />}
+                      onClick={onRegenerate}
+                    >
+                      Regenerate
+                    </Button>
+                  ) : null}
                 </div>
               ) : null}
             </div>

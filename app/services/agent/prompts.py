@@ -27,46 +27,38 @@ Return ONLY the title text, nothing else.
 
 User message: {message}"""
 
-SUMMARIZE_HISTORY_PROMPT = """You are an AI summarizing the **most recent** turns of a movie/TV chat (oldest message first in the log).
+SUMMARY_HISTORY_PROMPT = """Summarize the following chat turns (oldest first) in **2–4 short sentences**.
+Capture: current topic (titles/franchises), what the user wants now, and unresolved follow-ups.
+Do not list every message; compress into one memory block for the next steps.
 
-Capture:
-- The **current topic** (titles, franchises, anime vs live-action, etc.)
-- What the user already asked for (e.g. full film lists, sequels, spin-offs)
-- **Unresolved or implied intent** (e.g. if they asked for "more" or "watch options", note what that refers to)
-
-Return a concise 2-3 sentence paragraph the next assistant step can use as memory.
-
-Chat Log:
-{chat_history}
+Chat turns:
+{chat_turns}
 """
 
-OPTIMIZE_CONTEXT_PROMPT = """You are a Context Router optimizing a prompt before it reaches a Movie Expert Agent.
-The latest user message may be **short or vague** ("more", "what about streaming", "watch options"). Use the conversation summary to **spell out** what they mean in full.
+OPTIMIZE_PRE_LLM_PROMPT = """You compress routing context for a movie assistant. Output **one short paragraph** (max ~120 words) that:
+- Restates the user's latest intent clearly (expand vague follow-ups using the summary).
+- States any concrete titles/IDs already known from the summary.
 
-Read the user's upcoming question, the recent-turn summary, and liked-message patterns.
-Synthesize **one** clear instruction so the Movie Agent knows the exact titles/franchise and task (e.g. "Suggest legal streaming/rental options for the Naruto films we listed" not generic platform marketing).
+Conversation summary:
+{history_summary}
 
-User's Latest Query: {user_query}
-Past Conversation Summary: {history_summary}
-User's Positive Feedback Patterns (What they liked before): {feedback_context}
+Latest user message:
+{user_query}
 
-Return ONLY the newly optimized prompt. Do not add any conversational fluff.
-"""
+Liked-message style hints (optional):
+{feedback_context}
 
-EVALUATE_QUALITY_PROMPT = """You are a Quality Assurance Agent grading a movie bot's response draft.
-Critique the response against the user's initial query. 
+Output only the optimized instruction paragraph, no preamble."""
+
+QUALITY_EVAL_SYSTEM_PROMPT = """You are a strict evaluator for a movie-chat assistant.
+Score how well the draft answers the user's request (facts, relevance, clarity).
+10 = fully satisfactory; 1 = useless or wrong."""
+
+TOOLS_PHASE_SYSTEM_PROMPT = """You are a **research** step for a movie assistant. You have tools: `search_movies` and `get_movie_details`.
 
 Rules:
-1. Did the response actually answer the prompt meaningfully?
-2. Did it utilize appropriate context/trivia if referencing a specific movie?
-3. Did it avoid sounding confused or hallucinatory?
+1. Use tools to fetch **accurate** facts (titles, years, IMDb IDs, plots, ratings). Never invent movie data.
+2. Call tools until you have enough to answer the user's request, then **stop calling tools** (respond without tool_calls when research is sufficient).
+3. Do **not** write a polished, user-facing reply here — only brief reasoning if needed and tool calls.
+4. Short follow-ups ("more", "which one") refer to the **recent conversation** in the user message block — use tools if you need IDs or details."""
 
-Score it numerically from 1 to 10 on the first line. 
-On the second line, provide a 1-sentence reason why. 
-
-Draft Response:
-{draft_response}
-
-User Query:
-{user_query}
-"""

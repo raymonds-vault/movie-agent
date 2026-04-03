@@ -58,10 +58,12 @@ async def chat_websocket(
         data = await websocket.receive_json()
         message = data.get("message")
         conversation_id = data.get("conversation_id")
-        
+        regenerate = bool(data.get("regenerate"))
+
         async for chunk in service.stream_message(
-            message=message, 
-            conversation_id=conversation_id
+            message=message,
+            conversation_id=conversation_id,
+            regenerate=regenerate,
         ):
             await websocket.send_text(chunk)
             

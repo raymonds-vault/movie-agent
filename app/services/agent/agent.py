@@ -1,30 +1,41 @@
 """
-Custom LangGraph agent factory.
-Manages context optimization, history summarization, and agent self-reflection.
+LangGraph: summarize → optimize prompt → tools ⇄ tool node → synthesize → quality → (retry synth or end).
+
+Semantic cache + quality gate live in ChatService before the graph.
 """
 
+from __future__ import annotations
+
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables.config import RunnableConfig
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.services.agent.state import AgentState
 from app.services.agent.prompts import (
     MOVIE_AGENT_SYSTEM_PROMPT,
-    SUMMARIZE_HISTORY_PROMPT,
-    OPTIMIZE_CONTEXT_PROMPT,
-    EVALUATE_QUALITY_PROMPT
+    OPTIMIZE_PRE_LLM_PROMPT,
+    SUMMARY_HISTORY_PROMPT,
+    TOOLS_PHASE_SYSTEM_PROMPT,
 )
+from app.services.agent.quality import evaluate_answer_quality
+from app.services.agent.state import AgentState
 from app.services.agent.tools import ALL_TOOLS
 
 logger = get_logger(__name__)
 
+MAX_TOOL_PHASE_ROUNDS = 8
+
 
 def create_llm(settings: Settings) -> ChatOllama:
-    """Create the Ollama LLM instance."""
     return ChatOllama(
         model=settings.OLLAMA_MODEL,
         base_url=settings.OLLAMA_BASE_URL,
@@ -32,131 +43,195 @@ def create_llm(settings: Settings) -> ChatOllama:
     )
 
 
-async def summarize_node(state: AgentState, config: RunnableConfig):
-    settings = config.get("configurable", {}).get("settings")
-    llm = create_llm(settings)
-    
-    history = state.get("raw_history", [])
-    if not history:
-        return {"history_summary": "No previous conversation."}
-        
-    # Build text log for efficient LLM reading
-    chat_log = "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history])
-    prompt = SUMMARIZE_HISTORY_PROMPT.format(chat_history=chat_log)
-    
-    res = await llm.ainvoke(prompt, config=config)
-    return {"history_summary": res.content}
+def create_llm_synth(settings: Settings, *, use_fallback: bool) -> ChatOllama:
+    if use_fallback:
+        name = (
+            (settings.OLLAMA_SYNTH_FALLBACK_MODEL or "").strip()
+            or settings.OLLAMA_CODE_MODEL
+            or settings.OLLAMA_MODEL
+        )
+        return ChatOllama(
+            model=name,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=0.15,
+        )
+    return create_llm(settings)
 
 
-async def optimize_node(state: AgentState, config: RunnableConfig):
+async def summarize_history(state: AgentState, config: RunnableConfig):
+    """Rolling summary — compact memory instead of long raw history in later nodes."""
     settings = config.get("configurable", {}).get("settings")
     llm = create_llm(settings)
-    
-    prompt = OPTIMIZE_CONTEXT_PROMPT.format(
-        user_query=state.get("user_query", ""),
-        history_summary=state.get("history_summary", "None"),
-        feedback_context=state.get("feedback_context", "None")
+    raw = state.get("raw_history") or []
+    if not raw:
+        return {"history_summary": "No prior conversation."}
+    chat_turns = "\n".join(
+        f"{m.get('role', 'user')}: {m.get('content', '')}" for m in raw
     )
-    
+    prompt = SUMMARY_HISTORY_PROMPT.format(chat_turns=chat_turns)
     res = await llm.ainvoke(prompt, config=config)
-    return {"optimized_query": res.content}
+    return {"history_summary": (res.content or "").strip() or "No prior conversation."}
 
 
-async def agent_node(state: AgentState, config: RunnableConfig):
+async def optimize_prompt(state: AgentState, config: RunnableConfig):
+    """Short instruction for tool phase — reduces tokens / latency before tools + LLM."""
+    settings = config.get("configurable", {}).get("settings")
+    llm = create_llm(settings)
+    prompt = OPTIMIZE_PRE_LLM_PROMPT.format(
+        history_summary=state.get("history_summary", "None"),
+        user_query=state.get("user_query", ""),
+        feedback_context=state.get("feedback_context", "None"),
+    )
+    res = await llm.ainvoke(prompt, config=config)
+    return {"optimized_prompt": (res.content or "").strip() or state.get("user_query", "")}
+
+
+def _tools_phase_human_block(state: AgentState) -> str:
+    return (
+        f"Conversation summary (memory):\n{state.get('history_summary', 'None')}\n\n"
+        f"Optimized task:\n{state.get('optimized_prompt', state.get('user_query', ''))}\n\n"
+        f"Latest user message:\n{state.get('user_query', '')}"
+    )
+
+
+def _research_transcript(messages: list[BaseMessage]) -> str:
+    lines: list[str] = []
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            continue
+        if isinstance(m, HumanMessage):
+            lines.append(f"Human:\n{m.content}")
+        elif isinstance(m, AIMessage):
+            chunk = f"Assistant:\n{m.content or ''}"
+            if m.tool_calls:
+                chunk += f"\n[tool_calls: {len(m.tool_calls)}]"
+            lines.append(chunk)
+        elif isinstance(m, ToolMessage):
+            lines.append(f"Tool ({m.name}):\n{m.content}")
+        else:
+            lines.append(f"{type(m).__name__}:\n{getattr(m, 'content', '')}")
+    return "\n\n---\n\n".join(lines) if lines else "(no research)"
+
+
+async def tools_phase(state: AgentState, config: RunnableConfig):
     settings = config.get("configurable", {}).get("settings")
     llm = create_llm(settings).bind_tools(ALL_TOOLS)
-    
-    # 1. Base persona
-    msgs: list[BaseMessage] = [SystemMessage(content=MOVIE_AGENT_SYSTEM_PROMPT)]
-    
-    # 2. Optimized instruction integrating context
-    msgs.append(HumanMessage(content=state.get("optimized_query", "")))
-    
-    # 3. Native tool/AI execution loop tracking
-    msgs.extend(state.get("messages", []))
-    
+
+    prev = state.get("tool_rounds", 0)
+    next_round = prev + 1
+
+    if next_round > MAX_TOOL_PHASE_ROUNDS:
+        logger.warning(
+            "Tool phase round cap (%s) reached; forcing synthesizer.",
+            MAX_TOOL_PHASE_ROUNDS,
+        )
+        return {
+            "tool_rounds": prev,
+            "messages": [
+                AIMessage(
+                    content="[Research stopped at cap]: use tool results above and conversation context."
+                )
+            ],
+        }
+
+    existing = list(state.get("messages") or [])
+    if not existing:
+        msgs: list[BaseMessage] = [
+            SystemMessage(content=TOOLS_PHASE_SYSTEM_PROMPT),
+            HumanMessage(content=_tools_phase_human_block(state)),
+        ]
+    else:
+        msgs = existing
+
     res = await llm.ainvoke(msgs, config=config)
-    return {"messages": [res]}
+    return {"messages": [res], "tool_rounds": next_round}
 
 
-async def evaluate_node(state: AgentState, config: RunnableConfig):
+async def synthesizer(state: AgentState, config: RunnableConfig):
     settings = config.get("configurable", {}).get("settings")
-    llm = create_llm(settings)
-    
-    messages = state.get("messages", [])
-    if not messages:
-        return {"quality_score": 10}
-        
-    last_message = messages[-1]
-    
-    prompt = EVALUATE_QUALITY_PROMPT.format(
-        draft_response=last_message.content,
-        user_query=state.get("user_query", "")
+    prev = state.get("synthesis_pass_count", 0)
+    use_fallback = prev >= 1
+    llm = create_llm_synth(settings, use_fallback=use_fallback)
+    research = list(state.get("messages") or [])
+    transcript = _research_transcript(research)
+    fb = (state.get("quality_feedback") or "").strip()
+    retry_hint = ""
+    if fb and prev >= 1:
+        retry_hint = f"\n\nPrevious answer was weak. Improve using this feedback: {fb}"
+
+    human = HumanMessage(
+        content=(
+            f"Answer the user's latest message using the research and summary below.{retry_hint}\n\n"
+            f"--- Conversation summary ---\n{state.get('history_summary', '')}\n\n"
+            f"--- Optimized task ---\n{state.get('optimized_prompt', '')}\n\n"
+            f"--- User message ---\n{state.get('user_query', '')}\n\n"
+            f"--- Tool research ---\n{transcript}"
+        )
     )
-    
-    res = await llm.ainvoke(prompt, config=config)
-    content = str(res.content).strip()
-    
-    score = 10
-    try:
-        first_line = content.split('\n')[0]
-        parsed_digits = ''.join(filter(str.isdigit, first_line))
-        if parsed_digits:
-            score = int(parsed_digits)
-    except Exception as e:
-        logger.warning(f"Failed to parse quality score: {e}")
-        
-    # If the LLM generates a poor response, explicitly push a failing flag backward into the state context
-    if score < 6:
-        reason = content.split('\n')[-1]
-        msg = HumanMessage(content=f"Quality Evaluation Failed (Score: {score}/10). Reason: {reason}. Please rethink your answer completely and provide a better response.")
-        return {"quality_score": score, "messages": [msg]}
-        
-    return {"quality_score": score}
+    msgs = [SystemMessage(content=MOVIE_AGENT_SYSTEM_PROMPT), human]
+    res = await llm.ainvoke(msgs, config=config)
+    text = str(res.content or "").strip()
+    return {"final_response": text, "synthesis_pass_count": prev + 1}
 
 
-def agent_router(state: AgentState) -> str:
-    messages = state.get("messages", [])
+async def quality_eval(state: AgentState, config: RunnableConfig):
+    settings = config.get("configurable", {}).get("settings")
+    score, reason = await evaluate_answer_quality(
+        settings,
+        user_query=state.get("user_query", ""),
+        draft_response=state.get("final_response") or "",
+        source="graph",
+        run_config=config,
+    )
+    return {"quality_score": score, "quality_feedback": reason}
+
+
+def route_after_tools_phase(state: AgentState) -> str:
+    messages = state.get("messages") or []
     if not messages:
-        return "evaluate"
-        
-    last_message = messages[-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "synthesizer"
+    last = messages[-1]
+    if isinstance(last, AIMessage) and last.tool_calls:
         return "tools"
-    return "evaluate"
-
-
-def evaluate_router(state: AgentState) -> str:
-    # Recursively return to agent if evaluated poorly
-    if state.get("quality_score", 10) < 6:
-        return "agent"
-    return END
+    return "synthesizer"
 
 
 def create_movie_agent(settings: Settings):
-    """
-    Constructs the stateful LangGraph engine with discrete analytical nodes.
-    """
+    min_q = settings.QUALITY_MIN_SCORE
+    max_passes = settings.MAX_SYNTHESIS_PASSES
+
+    def route_after_quality(state: AgentState) -> str:
+        if state.get("quality_score", 0) >= min_q:
+            return "end"
+        if state.get("synthesis_pass_count", 0) >= max_passes:
+            return "end"
+        return "synthesizer"
+
     graph = StateGraph(AgentState)
-    
-    # Register Nodes
-    graph.add_node("summarize", summarize_node)
-    graph.add_node("optimize", optimize_node)
-    graph.add_node("agent", agent_node)
+    graph.add_node("summarize_history", summarize_history)
+    graph.add_node("optimize_prompt", optimize_prompt)
+    graph.add_node("tools_phase", tools_phase)
     graph.add_node("tools", ToolNode(ALL_TOOLS))
-    graph.add_node("evaluate", evaluate_node)
-    
-    # Define Edges
-    graph.add_edge(START, "summarize")
-    graph.add_edge("summarize", "optimize")
-    graph.add_edge("optimize", "agent")
-    
-    # Native Conditional Routing
-    graph.add_conditional_edges("agent", agent_router, {"tools": "tools", "evaluate": "evaluate"})
-    graph.add_edge("tools", "agent")
-    graph.add_conditional_edges("evaluate", evaluate_router, {"agent": "agent", END: END})
-    
-    logger.info("Custom Movie Agent LangGraph fully compiled!")
-    
-    # Compile graph securely, passing settings as valid config
+    graph.add_node("synthesizer", synthesizer)
+    graph.add_node("quality_eval", quality_eval)
+
+    graph.add_edge(START, "summarize_history")
+    graph.add_edge("summarize_history", "optimize_prompt")
+    graph.add_edge("optimize_prompt", "tools_phase")
+    graph.add_conditional_edges(
+        "tools_phase",
+        route_after_tools_phase,
+        {"tools": "tools", "synthesizer": "synthesizer"},
+    )
+    graph.add_edge("tools", "tools_phase")
+    graph.add_edge("synthesizer", "quality_eval")
+    graph.add_conditional_edges(
+        "quality_eval",
+        route_after_quality,
+        {"end": END, "synthesizer": "synthesizer"},
+    )
+
+    logger.info(
+        "Movie Agent LangGraph compiled (summary → optimize → tools → LLM → quality)."
+    )
     return graph.compile()

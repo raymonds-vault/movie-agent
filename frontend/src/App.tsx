@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   App as AntApp,
   Button,
@@ -24,8 +24,36 @@ const { Header, Content } = Layout
 const { Text } = Typography
 
 function AppShell() {
-  const { messages, sendMessage, stop, newChat, isStreaming, lastAgentTrace } =
-    useChatWebSocket()
+  const {
+    messages,
+    sendMessage,
+    regenerate,
+    stop,
+    newChat,
+    isStreaming,
+    lastAgentTrace,
+    conversationId,
+  } = useChatWebSocket()
+
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'assistant' && m.id !== 'welcome') return m.id
+    }
+    return null
+  }, [messages])
+
+  const canRegenerate =
+    !isStreaming &&
+    !!conversationId &&
+    lastAssistantId !== null &&
+    messages.some(
+      (m) =>
+        m.id === lastAssistantId &&
+        !!m.content?.trim() &&
+        !m.error &&
+        !m.stopped,
+    )
 
   const [traceDrawerOpen, setTraceDrawerOpen] = useState(false)
   const [input, setInput] = useState('')
@@ -93,6 +121,9 @@ function AppShell() {
               messages={messages}
               onScrollState={setNearBottom}
               scrollToBottomSignal={scrollTick}
+              onRegenerate={regenerate}
+              canRegenerate={canRegenerate}
+              lastAssistantId={lastAssistantId}
             />
             <div className="saas-web-composer shrink-0 border-t border-pink-100/90 bg-[#fafbfd] px-6 py-4 sm:px-10 lg:px-12">
               <div className="mx-auto w-full max-w-7xl">

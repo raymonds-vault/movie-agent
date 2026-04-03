@@ -1,133 +1,216 @@
 # 🎬 Movie Agent
 
-An AI-powered movie assistant built with **FastAPI** and **LangChain**, using **Ollama** (llama3) for local LLM inference. Chat about movies, get recommendations, search for films, and discover trending content.
+Movie Agent is a local-first AI movie assistant built with FastAPI + LangGraph + Ollama, with Redis semantic cache and Langfuse observability.
 
-## Architecture
+This README documents:
+- system design and control flow
+- node-by-node technical behavior
+- class/function responsibilities
+- packages and runtime dependencies
+- screenshot-backed tracing and UI references
 
-```
-┌───────────────────────────────────────────────────────┐
-│                    FastAPI Application                  │
-├───────────────────────────────────────────────────────┤
-│  Controllers (Thin)     │  /api/v1/chat               │
-│                         │  /api/v1/movies              │
-│                         │  /health                     │
-├─────────────────────────┼─────────────────────────────┤
-│  Service Layer          │  ChatService                 │
-│  (Business Logic)       │  MovieService                │
-│                         │  └─ Agent (LangChain)        │
-├─────────────────────────┼─────────────────────────────┤
-│  Repository Layer       │  ConversationRepo            │
-│  (Data Access)          │  MessageRepo                 │
-│                         │  MovieRepo (cache)           │
-├─────────────────────────┼─────────────────────────────┤
-│  Infrastructure         │  SQLite (async)              │
-│                         │  Ollama (llama3)             │
-│                         │  TMDB API (httpx)            │
-└───────────────────────────────────────────────────────┘
-```
+## Product Screenshots
 
-**Dependency flow:** `Controller → Service → Repository` (strictly unidirectional)
+### App UI (CinemaBot)
+![CinemaBot UI](/home/raymond/.cursor/projects/home-raymond-Desktop-coding-ai-movie-agent/assets/Screenshot_from_2026-04-03_14-51-24-9aa84382-099a-4ce4-b3ec-afd1b040f4e6.png)
 
-## Prerequisites
+### Langfuse Trace Graph + Inputs/Outputs
+![Langfuse Trace](/home/raymond/.cursor/projects/home-raymond-Desktop-coding-ai-movie-agent/assets/Screenshot_from_2026-04-03_14-51-31-db39af2e-fc53-491f-8f6e-90a62c0aca38.png)
 
-- **Python 3.11+**
-- **Ollama** running locally with `llama3` model pulled
-- **TMDB API key** (free at [themoviedb.org](https://www.themoviedb.org/settings/api)) — optional for chat-only mode
+## Overall System Design
 
-## Quick Start
-
-```bash
-# 1. Create virtual environment
-python -m venv venv
-source venv/bin/activate
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure environment
-cp .env.example .env
-# Edit .env with your TMDB_API_KEY
-
-# 4. Ensure Ollama is running with llama3
-ollama pull llama3
-
-# 5. Start the server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```text
+Client (React + WS)
+   -> FastAPI Controllers
+      -> ChatService
+         -> Redis semantic cache (+ optional LLM verifier)
+         -> LangGraph agent pipeline
+             summarize_history
+             -> optimize_prompt
+             -> tools_phase <-> ToolNode(OMDb tools)
+             -> synthesizer
+             -> quality_eval
+             -> (retry synthesizer with fallback model OR accept)
+         -> persist messages + optional Redis write-back
+      -> Repositories (SQLAlchemy async/MySQL)
 ```
 
-## API Endpoints
+### Layering
+- `controllers` -> HTTP/WS transport only
+- `services` -> orchestration/business logic
+- `repositories` -> database access
+- `services/agent` -> graph, prompts, tools, quality, tracing metadata
+- `core` -> app config, logging, DB/Redis setup, Langfuse setup
+
+## User Flow
+
+1. User sends message from composer.
+2. WebSocket `/api/v1/chat/ws` starts streaming turn.
+3. `ChatService.stream_message()` optionally tries semantic cache.
+4. If cache hit:
+   - evaluate quality with shared quality gate
+   - if acceptable: return cached answer immediately
+   - else: continue to graph
+5. Graph executes:
+   - summarize recent history into compact memory
+   - optimize prompt for low-token routing
+   - run tool-calling phase and OMDb tools
+   - synthesize user-facing response
+   - evaluate response quality
+   - if low quality and retries remain: regenerate with fallback model
+6. Final response is persisted and streamed to UI.
+7. Response can be regenerated from UI (same last user message, same conversation).
+
+## Control Flow (Graph)
+
+```text
+START
+  -> summarize_history
+  -> optimize_prompt
+  -> tools_phase
+      -> if tool calls present: tools -> tools_phase
+      -> else: synthesizer
+  -> quality_eval
+      -> if score >= QUALITY_MIN_SCORE: END
+      -> else if synthesis_pass_count < MAX_SYNTHESIS_PASSES: synthesizer
+      -> else: END
+```
+
+## Technical Reference: Agent Nodes
+
+### `summarize_history(state, config)`
+- File: `app/services/agent/agent.py`
+- Uses: `SUMMARY_HISTORY_PROMPT` + base model
+- Input: `raw_history` (recent DB messages)
+- Output: `history_summary` (2-4 sentence compact memory)
+- Goal: reduce prompt size and preserve context quality
+
+### `optimize_prompt(state, config)`
+- Uses: `OPTIMIZE_PRE_LLM_PROMPT`
+- Inputs: `history_summary`, `user_query`, `feedback_context`
+- Output: `optimized_prompt`
+- Goal: convert vague follow-ups into explicit, short task instructions before tool/LLM steps
+
+### `tools_phase(state, config)`
+- Uses: `ChatOllama(...).bind_tools(ALL_TOOLS)` + `TOOLS_PHASE_SYSTEM_PROMPT`
+- First iteration input: summary + optimized task + latest message
+- Loops with `ToolNode(ALL_TOOLS)` while `AIMessage.tool_calls` exist
+- Guard: `MAX_TOOL_PHASE_ROUNDS = 8`
+
+### `tools` (LangGraph `ToolNode`)
+- Executes registered async tools:
+  - `search_movies(query)`
+  - `get_movie_details(imdb_id)`
+- Tool outputs are appended as `ToolMessage` into graph state
+
+### `synthesizer(state, config)`
+- Creates polished user response without tool bindings
+- Uses:
+  - `MOVIE_AGENT_SYSTEM_PROMPT`
+  - `history_summary`
+  - `optimized_prompt`
+  - flattened tool transcript
+  - prior `quality_feedback` on retries
+- Retry model behavior:
+  - first pass: `OLLAMA_MODEL`
+  - retry pass: `OLLAMA_SYNTH_FALLBACK_MODEL` or `OLLAMA_CODE_MODEL`
+
+### `quality_eval(state, config)`
+- Calls shared helper `evaluate_answer_quality(...)`
+- Output: `quality_score`, `quality_feedback`
+- Route rules:
+  - accept if score >= `QUALITY_MIN_SCORE`
+  - retry synth if under threshold and pass count < `MAX_SYNTHESIS_PASSES`
+
+## Shared Helper Classes / Functions
+
+### `ChatService` (`app/services/chat_service.py`)
+- Primary orchestrator for sync and streaming chat
+- Important methods:
+  - `_try_semantic_cache(message)` -> vector lookup + optional verification
+  - `process_message(...)` -> HTTP flow
+  - `stream_message(..., regenerate=False)` -> WS streaming flow
+  - `_agent_state_payload(...)` -> graph input packaging
+  - `_make_langfuse_handler()` -> per-request callback handler
+- Regenerate mode:
+  - reuses latest user message from DB
+  - skips cache by design
+  - appends new assistant response only
+
+### `evaluate_answer_quality(...)` (`app/services/agent/quality.py`)
+- Shared quality gate for:
+  - cache path
+  - graph output
+  - regeneration output
+- Uses same model family and deterministic parsing into `(score, reason)`
+
+### `MessageRepository` (`app/repositories/conversation_repo.py`)
+- `get_recent_by_conversation(...)` for rolling context
+- `get_latest_user_message(conversation_id)` for regenerate
+- `add_message(...)`, `set_message_feedback(...)`, `get_liked_messages(...)`
+
+### Trace helpers (`app/services/agent/trace_events.py`)
+- `build_agent_run_config(...)` -> tags + metadata + callbacks
+- `append_trace_from_astream_event(...)` -> compact UI timeline
+- `try_get_observability_trace_id(...)` -> Langfuse trace id extraction
+
+## API Surface
 
 ### Chat
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/chat` | Send a message to the movie agent |
-| `GET` | `/api/v1/chat/conversations` | List all conversations |
-| `GET` | `/api/v1/chat/{id}` | Get conversation with messages |
-| `DELETE` | `/api/v1/chat/{id}` | Delete a conversation |
+|---|---|---|
+| `POST` | `/api/v1/chat` | Sync message-response |
+| `GET` | `/api/v1/chat/conversations` | List conversations |
+| `GET` | `/api/v1/chat/{conversation_id}` | Conversation with messages |
+| `DELETE` | `/api/v1/chat/{conversation_id}` | Delete conversation |
+| `POST` | `/api/v1/chat/message/{message_id}/feedback` | Like/dislike assistant message |
+| `WS` | `/api/v1/chat/ws` | Streaming chat + regenerate (`regenerate: true`) |
 
-### Movies (Direct TMDB access)
+### Movies
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/v1/movies/search?q=...` | Search movies by title |
-| `GET` | `/api/v1/movies/trending` | Get trending movies |
-| `GET` | `/api/v1/movies/{tmdb_id}` | Get movie details |
-| `GET` | `/api/v1/movies/{tmdb_id}/recommendations` | Get similar movies |
+|---|---|---|
+| `GET` | `/api/v1/movies/search?q=...` | Search movie titles |
+| `GET` | `/api/v1/movies/{imdb_id}` | Fetch movie detail |
 
-### System
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check with dependency status |
-| `GET` | `/docs` | Swagger UI |
-| `GET` | `/redoc` | ReDoc API docs |
+## Core Packages Used
 
-## Example Usage
+From `requirements.txt`:
+- `fastapi`, `uvicorn` -> API + runtime
+- `langchain`, `langgraph`, `langchain-ollama`, `langchain-community` -> agent pipeline
+- `langfuse` -> observability/tracing
+- `sqlalchemy[asyncio]`, `aiomysql` -> persistence
+- `redis` -> semantic cache storage/search
+- `httpx` -> external API clients
+- `pydantic-settings` -> environment-driven config
+- `python-dotenv` -> local env loading
+
+## Environment Configuration (Key Runtime Flags)
 
 ```bash
-# Chat with the agent
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What are the best sci-fi movies of all time?"}'
+# Base model
+OLLAMA_MODEL=llama3.1
 
-# Continue a conversation
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Tell me more about the first one", "conversation_id": "YOUR_CONV_ID"}'
+# Retry model when quality fails
+OLLAMA_SYNTH_FALLBACK_MODEL=
+OLLAMA_CODE_MODEL=deepseek-coder
 
-# Search movies directly
-curl "http://localhost:8000/api/v1/movies/search?q=inception"
+# Quality controls
+QUALITY_MIN_SCORE=6
+MAX_SYNTHESIS_PASSES=2
 
-# Get trending movies
-curl "http://localhost:8000/api/v1/movies/trending"
+# Semantic cache verification
+SEMANTIC_CACHE_VERIFY=true
 ```
 
-## Project Structure
+## Langfuse Observability
 
-```
-app/
-├── core/           # Config, DB, dependencies, exceptions, logging
-├── models/         # SQLAlchemy ORM models (Conversation, Message, CachedMovie)
-├── schemas/        # Pydantic DTOs (request/response validation)
-├── repositories/   # Data access layer (generic CRUD + specialized queries)
-├── services/       # Business logic layer
-│   └── agent/      # LangChain agent (tools, prompts, factory)
-├── controllers/    # FastAPI routers (thin — delegate to services)
-├── utils/          # TMDB HTTP client
-└── main.py         # App factory & lifespan
-```
-
-## Langfuse observability (optional, local Docker)
-
-Run [Langfuse](https://langfuse.com) locally with the official stack (see [Langfuse Docker Compose](https://langfuse.com/docs/deployment/local)):
+Run local stack:
 
 ```bash
 docker compose up -d
 ```
 
-Docker Compose loads this project’s `.env`. Because the API often sets `DATABASE_URL` to **MySQL**, the compose file uses **`LANGFUSE_DATABASE_URL`** (defaulting to the bundled Postgres service) so Langfuse does not inherit the wrong scheme.
-
-This repo includes [`docker-compose.yml`](docker-compose.yml) (upstream Langfuse v3 stack). The web UI is published on **`LANGFUSE_WEB_PORT` (default `3001`)** so it does not collide with an older Langfuse v2 instance often left on **3000**. Host ports **6380** and **5433** are used for Redis and Postgres so they do not clash with a typical local Redis on **6379** or Postgres on **5432**. Wait until the web UI is ready, then open **http://localhost:3001**, sign up, and use a project named **`movie-agent`** (or rename yours to match). Copy that project’s **public** and **secret** API keys.
-
-Set in the API `.env` (never commit secrets). **`LANGFUSE_ENABLED` defaults to `true`**: once both keys are set, tracing turns on without an extra flag. Use `LANGFUSE_ENABLED=false` only if you want to keep keys in the file but disable export.
+Recommended config:
 
 ```bash
 LANGFUSE_PUBLIC_KEY=pk-lf-...
@@ -136,17 +219,22 @@ LANGFUSE_HOST=http://localhost:3001
 LANGFUSE_PROJECT_NAME=movie-agent
 ```
 
-`LANGFUSE_HOST` must match your Langfuse base URL (with this compose file: `http://localhost:3001`); the app also sets `LANGFUSE_BASE_URL` for Langfuse SDK v4. Keys are scoped to the project you created in the UI. **Restart the API** after changing `.env` (settings are cached). LangGraph runs pass a per-request [`CallbackHandler`](https://langfuse.com/docs/integrations/langchain/tracing) and flush the client after each run so traces show up promptly. Runs include tags/metadata (`movie-agent`, `sync` or `stream`, `conversation_id`, `langfuse_project`).
+Important notes:
+- this project initializes Langfuse client on startup and uses per-request callback handlers
+- traces are flushed after each graph run
+- if OTLP endpoint `/api/public/otel/v1/traces` returns `404`, you are likely pointing to Langfuse v2
 
-If traces are still empty: confirm `docker compose ps` shows Langfuse healthy, open the UI on **`LANGFUSE_WEB_PORT`** (default **3001**), and ensure nothing sets `OTEL_SDK_DISABLED=true` in the API environment (that disables Langfuse export). On API startup, a probe logs an error if `LANGFUSE_HOST` points at a **v2** server (OTLP path returns **404**).
+## Quick Start
 
-**“Setup Tracing” stays pending / dashboard empty:** the Python SDK sends traces over **OpenTelemetry** to `http://<LANGFUSE_HOST>/api/public/otel/v1/traces`. **Langfuse server v2 does not expose that route** (you will see `404` and logs like `Failed to export span batch code: 404`). Run the **v3** stack from this repo’s [`docker-compose.yml`](docker-compose.yml) (`langfuse/langfuse:3` and `langfuse/langfuse-worker:3`), then `docker compose pull && docker compose up -d`. Quick check (use your UI port): `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3001/api/public/otel/v1/traces` — **404** means the server is too old; on v3 you should get **405** (method not allowed for GET) or similar, not 404. Use API keys from the **v3** project (not an old v2 instance on port 3000).
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-This app uses **Ollama**; you do not need `OPENAI_API_KEY`.
-
-The React **Trace** drawer shows the `astream_events` timeline; optional `observability_trace_id` links to Langfuse. For the drawer link, set `VITE_LANGFUSE_HOST` in `frontend/.env` (see `frontend/.env.example`).
-
-## Running Tests
+## Tests
 
 ```bash
 pip install pytest pytest-asyncio

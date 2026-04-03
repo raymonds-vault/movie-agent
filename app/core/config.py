@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     OLLAMA_CODE_MODEL: str = "deepseek-coder"
+    # Second synthesis pass when quality check fails (defaults to code model if unset).
+    OLLAMA_SYNTH_FALLBACK_MODEL: str = ""
 
     # ── OMDb ─────────────────────────────────────────
     OMDB_API_KEY: str = ""
@@ -42,6 +44,11 @@ class Settings(BaseSettings):
     OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
     # If True, an LLM must confirm a Redis semantic-cache hit before it is returned.
     SEMANTIC_CACHE_VERIFY: bool = True
+
+    # ── Answer quality (cache + graph + regenerate) ──
+    QUALITY_MIN_SCORE: int = 6
+    # Max synthesis runs per request (initial + retries after failed quality).
+    MAX_SYNTHESIS_PASSES: int = 2
 
     # ── Langfuse (local Docker or cloud) ──────────────
     # https://langfuse.com/docs — never commit keys.

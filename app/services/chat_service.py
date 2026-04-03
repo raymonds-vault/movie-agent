@@ -16,6 +16,7 @@ from app.repositories.conversation_repo import ConversationRepository, MessageRe
 from app.schemas.chat import ChatResponse, ConversationDetail, ConversationSummary, MessageSchema
 from app.services.agent.agent import create_movie_agent
 from app.services.agent.cache_verification import verify_semantic_cache_answer
+from app.services.agent.quality import evaluate_answer_quality
 from app.services.agent.langfuse_flush import flush_langfuse
 from app.services.agent.trace_events import (
     append_trace_from_astream_event,
@@ -29,8 +30,12 @@ from langchain_ollama import OllamaEmbeddings
 
 logger = get_logger(__name__)
 
-# Recent turns for summarize/optimize; must be latest messages, not the first N in the thread.
+# Recent turns for context in the tools → LLM pipeline (latest messages in the thread).
 HISTORY_CONTEXT_MESSAGE_LIMIT = 10
+
+
+def _astream_langgraph_node(event: dict) -> str | None:
+    return (event.get("metadata") or {}).get("langgraph_node")
 
 
 class ChatService:
@@ -153,33 +158,44 @@ class ChatService:
             )
             logger.info(f"New conversation created: {conversation.id}")
 
-        # 2. Check Semantic Cache (similarity + optional LLM verification)
+        # 2. Semantic cache — same quality gate as the graph (below)
         query_vector, cached_response = await self._try_semantic_cache(message)
 
         if cached_response is not None:
-            cache_tool_calls = (
-                '["cache","cache_verified"]'
-                if self._settings.SEMANTIC_CACHE_VERIFY
-                else '["cache"]'
+            q_score, _ = await evaluate_answer_quality(
+                self._settings,
+                user_query=message,
+                draft_response=cached_response,
+                source="cache",
             )
-            tool_calls_made = (
-                ["cache", "cache_verified"]
-                if self._settings.SEMANTIC_CACHE_VERIFY
-                else ["cache"]
-            )
-            await self._message_repo.add_message(
-                conversation_id=conversation.id, role="user", content=message
-            )
-            await self._message_repo.add_message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=cached_response,
-                tool_calls=cache_tool_calls,
-            )
-            return ChatResponse(
-                conversation_id=conversation.id,
-                reply=cached_response,
-                tool_calls_made=tool_calls_made,
+            if q_score >= self._settings.QUALITY_MIN_SCORE:
+                cache_tool_calls = (
+                    '["cache","cache_verified"]'
+                    if self._settings.SEMANTIC_CACHE_VERIFY
+                    else '["cache"]'
+                )
+                tool_calls_made = (
+                    ["cache", "cache_verified"]
+                    if self._settings.SEMANTIC_CACHE_VERIFY
+                    else ["cache"]
+                )
+                await self._message_repo.add_message(
+                    conversation_id=conversation.id, role="user", content=message
+                )
+                await self._message_repo.add_message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=cached_response,
+                    tool_calls=cache_tool_calls,
+                )
+                return ChatResponse(
+                    conversation_id=conversation.id,
+                    reply=cached_response,
+                    tool_calls_made=tool_calls_made,
+                )
+            logger.info(
+                "Semantic cache hit failed quality (%s); running full pipeline",
+                q_score,
             )
 
         # 3. Save user message
@@ -221,12 +237,25 @@ class ChatService:
             ):
                 append_trace_from_astream_event(event, trace_steps)
                 kind = event.get("event")
-                if kind == "on_tool_start":
+                if kind == "on_chain_start":
+                    node = _astream_langgraph_node(event)
+                    if node == "synthesizer":
+                        reply_text = ""
+                elif kind == "on_tool_start":
                     tool_calls_made.append(event.get("name", "unknown"))
                 elif kind == "on_chat_model_stream":
+                    if _astream_langgraph_node(event) != "synthesizer":
+                        continue
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
                         reply_text += str(chunk.content)
+                elif kind == "on_chat_model_end":
+                    if _astream_langgraph_node(event) != "synthesizer":
+                        continue
+                    out = event.get("data", {}).get("output")
+                    if out is not None and hasattr(out, "content") and out.content:
+                        if not reply_text:
+                            reply_text = str(out.content)
 
             if lf_handler is not None:
                 flush_langfuse()
@@ -261,63 +290,115 @@ class ChatService:
         )
 
     async def stream_message(
-        self, message: str, conversation_id: str | None = None
+        self,
+        message: str | None = None,
+        conversation_id: str | None = None,
+        *,
+        regenerate: bool = False,
     ) -> AsyncGenerator[str, None]:
-        if conversation_id:
+        """
+        Stream assistant reply. ``regenerate=True`` re-runs the last user message in the conversation
+        (skips cache; does not insert a duplicate user row).
+        """
+        skip_user_insert = False
+        query_vector: list[float] | None = None
+
+        if regenerate:
+            if not conversation_id:
+                yield json.dumps(
+                    {"type": "error", "content": "conversation_id is required to regenerate"}
+                )
+                return
             conversation = await self._conversation_repo.get_with_messages(conversation_id)
             if not conversation:
-                raise NotFoundException("Conversation", conversation_id)
+                yield json.dumps({"type": "error", "content": "Conversation not found"})
+                return
+            last_user = await self._message_repo.get_latest_user_message(conversation_id)
+            if not last_user:
+                yield json.dumps(
+                    {"type": "error", "content": "No user message to regenerate from"}
+                )
+                return
+            message = last_user.content
+            skip_user_insert = True
         else:
-            conversation = await self._conversation_repo.create(
-                title=message[:50] + ("..." if len(message) > 50 else "")
-            )
-            
+            if not (message or "").strip():
+                yield json.dumps({"type": "error", "content": "message is required"})
+                return
+            message = message.strip()
+            if conversation_id:
+                conversation = await self._conversation_repo.get_with_messages(
+                    conversation_id
+                )
+                if not conversation:
+                    yield json.dumps({"type": "error", "content": "Conversation not found"})
+                    return
+            else:
+                conversation = await self._conversation_repo.create(
+                    title=message[:50] + ("..." if len(message) > 50 else "")
+                )
+
         yield json.dumps({"type": "info", "conversation_id": conversation.id})
 
-        query_vector, cached_response = await self._try_semantic_cache(message)
+        cached_response: str | None = None
+        if not regenerate:
+            query_vector, cached_response = await self._try_semantic_cache(message)
+            if cached_response is not None:
+                q_score, _ = await evaluate_answer_quality(
+                    self._settings,
+                    user_query=message,
+                    draft_response=cached_response,
+                    source="cache",
+                )
+                if q_score >= self._settings.QUALITY_MIN_SCORE:
+                    cache_tool_calls = (
+                        '["cache","cache_verified"]'
+                        if self._settings.SEMANTIC_CACHE_VERIFY
+                        else '["cache"]'
+                    )
+                    await self._message_repo.add_message(
+                        conversation_id=conversation.id, role="user", content=message
+                    )
+                    await self._message_repo.add_message(
+                        conversation_id=conversation.id,
+                        role="assistant",
+                        content=cached_response,
+                        tool_calls=cache_tool_calls,
+                    )
 
-        if cached_response is not None:
-            cache_tool_calls = (
-                '["cache","cache_verified"]'
-                if self._settings.SEMANTIC_CACHE_VERIFY
-                else '["cache"]'
-            )
-            await self._message_repo.add_message(
-                conversation_id=conversation.id, role="user", content=message
-            )
+                    yield json.dumps({"type": "status", "content": "Cache hit…"})
+                    yield json.dumps({"type": "token", "content": cached_response})
+                    yield json.dumps({"type": "status", "content": ""})
+                    yield json.dumps({"type": "done"})
+                    return
+                logger.info(
+                    "Stream: cache failed quality (%s); full pipeline",
+                    q_score,
+                )
+
+        if not skip_user_insert:
             await self._message_repo.add_message(
                 conversation_id=conversation.id,
-                role="assistant",
-                content=cached_response,
-                tool_calls=cache_tool_calls,
+                role="user",
+                content=message,
             )
-
-            yield json.dumps({"type": "status", "content": "Cache hit..."})
-            yield json.dumps({"type": "token", "content": cached_response})
-            yield json.dumps({"type": "status", "content": ""})
-            yield json.dumps({"type": "done"})
-            return
-
-        await self._message_repo.add_message(
-            conversation_id=conversation.id,
-            role="user",
-            content=message,
-        )
 
         history_records = await self._message_repo.get_recent_by_conversation(
             conversation.id, limit=HISTORY_CONTEXT_MESSAGE_LIMIT
         )
         liked_messages = await self._message_repo.get_liked_messages(limit=5)
-        feedback_context = " | ".join([m.content for m in liked_messages]) if liked_messages else "None"
+        feedback_context = (
+            " | ".join([m.content for m in liked_messages]) if liked_messages else "None"
+        )
 
         reply_text = ""
-        tool_calls_made = []
+        tool_calls_made: list[str] = []
         trace_steps: list[dict] = []
         lf_handler = self._make_langfuse_handler()
         callbacks = [lf_handler] if lf_handler else None
 
         try:
-            yield json.dumps({"type": "status", "content": "Analyzing context..."})
+            yield json.dumps({"type": "status", "content": "Preparing context…"})
 
             agent_input = self._agent_state_payload(
                 conversation, message, history_records, feedback_context
@@ -336,28 +417,31 @@ class ChatService:
             ):
                 append_trace_from_astream_event(event, trace_steps)
                 kind = event["event"]
-                
-                # Streaming Graph Internal State Transitions
+
                 if kind == "on_chain_start":
                     meta = event.get("metadata") or {}
                     node_name = meta.get("langgraph_node") or event.get("name", "")
-                    if node_name == "summarize":
-                        yield json.dumps({"type": "status", "content": "Summarizing history..."})
-                    elif node_name == "optimize":
-                        yield json.dumps({"type": "status", "content": "Optimizing prompt context..."})
-                    elif node_name == "evaluate":
-                        yield json.dumps({"type": "status", "content": "Evaluating logic..."})
-                    elif node_name == "agent":
-                        yield json.dumps({"type": "status", "content": "Thinking..."})
+                    if node_name == "synthesizer":
+                        reply_text = ""
+                    if node_name == "summarize_history":
+                        yield json.dumps({"type": "status", "content": "Summarizing history…"})
+                    elif node_name == "optimize_prompt":
+                        yield json.dumps({"type": "status", "content": "Optimizing prompt…"})
+                    elif node_name == "tools_phase":
+                        yield json.dumps({"type": "status", "content": "Looking up movies…"})
+                    elif node_name == "synthesizer":
+                        yield json.dumps({"type": "status", "content": "Writing reply…"})
+                    elif node_name == "quality_eval":
+                        yield json.dumps({"type": "status", "content": "Checking quality…"})
 
-                # Handling tool usages
                 elif kind == "on_tool_start":
                     tool_name = event["name"]
-                    yield json.dumps({"type": "status", "content": f"Using tool: {tool_name}..."})
+                    yield json.dumps({"type": "status", "content": f"Tool: {tool_name}…"})
                     tool_calls_made.append(tool_name)
-                    
-                # Handling the actual LLM string tokens streaming
+
                 elif kind == "on_chat_model_stream":
+                    if _astream_langgraph_node(event) != "synthesizer":
+                        continue
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
                         content_str = str(chunk.content)
@@ -381,7 +465,7 @@ class ChatService:
         except Exception as e:
             logger.error(f"Streaming failed: {e}", exc_info=True)
             yield json.dumps({"type": "error", "content": "Error generating response."})
-            
+
         if reply_text:
             saved_msg = await self._message_repo.add_message(
                 conversation_id=conversation.id,
@@ -389,12 +473,16 @@ class ChatService:
                 content=reply_text,
                 tool_calls=json.dumps(tool_calls_made) if tool_calls_made else None,
             )
-            # Emit the persisted message ID so the frontend can attach feedback to it
             yield json.dumps({"type": "message_id", "message_id": saved_msg.id})
-            
+
+            if self._redis_repo and query_vector is None:
+                try:
+                    query_vector = await self._embeddings.aembed_query(message)
+                except Exception as e:
+                    logger.warning("Redis embed for store failed: %s", e)
             if self._redis_repo and query_vector:
                 await self._redis_repo.store_query(message, reply_text, query_vector)
-            
+
         yield json.dumps({"type": "done"})
 
     async def get_conversation(self, conversation_id: str) -> ConversationDetail:

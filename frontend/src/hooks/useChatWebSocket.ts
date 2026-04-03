@@ -14,6 +14,7 @@ function welcomeMessages(): ChatMessage[] {
 
 export function useChatWebSocket() {
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages)
+  const [conversationId, setConversationId] = useState<string | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
   const [lastAgentTrace, setLastAgentTrace] = useState<AgentTracePayload | null>(
@@ -71,6 +72,7 @@ export function useChatWebSocket() {
     wsRef.current?.close()
     wsRef.current = null
     conversationIdRef.current = null
+    setConversationId(null)
     pendingMessageIdRef.current = null
     setWsConnected(false)
     setIsStreaming(false)
@@ -135,6 +137,7 @@ export function useChatWebSocket() {
         switch (data.type) {
           case 'info':
             conversationIdRef.current = data.conversation_id
+            setConversationId(data.conversation_id)
             break
           case 'agent_trace':
             setLastAgentTrace({
@@ -207,9 +210,125 @@ export function useChatWebSocket() {
     [isStreaming, finishAssistantTurn],
   )
 
+  const regenerate = useCallback(() => {
+    if (isStreaming || !conversationIdRef.current) return
+
+    stopRequestedRef.current = false
+    pendingMessageIdRef.current = null
+
+    const assistantId = crypto.randomUUID()
+    const assistantMsg: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      awaitingFirstToken: true,
+      agentStatus: 'Regenerating…',
+    }
+    setMessages((prev) => [...prev, assistantMsg])
+    setIsStreaming(true)
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/chat/ws`)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setWsConnected(true)
+      ws.send(
+        JSON.stringify({
+          regenerate: true,
+          conversation_id: conversationIdRef.current,
+        }),
+      )
+    }
+
+    ws.onmessage = (evt) => {
+      if (stopRequestedRef.current) return
+      let data: WsInbound
+      try {
+        data = JSON.parse(evt.data) as WsInbound
+      } catch {
+        return
+      }
+
+      switch (data.type) {
+        case 'info':
+          conversationIdRef.current = data.conversation_id
+          setConversationId(data.conversation_id)
+          break
+        case 'agent_trace':
+          setLastAgentTrace({
+            steps: data.steps,
+            observability_trace_id: data.observability_trace_id,
+          })
+          break
+        case 'message_id':
+          pendingMessageIdRef.current = data.message_id
+          break
+        case 'status':
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    agentStatus: data.content || null,
+                  }
+                : m,
+            ),
+          )
+          break
+        case 'token':
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content: m.content + data.content,
+                    awaitingFirstToken: false,
+                    agentStatus: null,
+                  }
+                : m,
+            ),
+          )
+          break
+        case 'done':
+          finishAssistantTurn(assistantId)
+          break
+        case 'error':
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content: data.content,
+                    error: true,
+                    awaitingFirstToken: false,
+                    agentStatus: null,
+                  }
+                : m,
+            ),
+          )
+          finishAssistantTurn(assistantId)
+          break
+      }
+    }
+
+    ws.onerror = () => {
+      setWsConnected(false)
+    }
+
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return
+      wsRef.current = null
+      setWsConnected(false)
+      setIsStreaming(false)
+    }
+  }, [isStreaming, finishAssistantTurn])
+
   return {
     messages,
     sendMessage,
+    regenerate,
+    conversationId,
     stop,
     newChat,
     isStreaming,

@@ -95,6 +95,17 @@ class MessageRepository(BaseRepository[Message]):
             await self._session.commit()
         return message
 
+    async def get_latest_user_message(self, conversation_id: str) -> Message | None:
+        """Most recent user message in the conversation."""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id, Message.role == "user")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_liked_messages(self, limit: int = 10) -> list[Message]:
         """Fetch historically liked messages for optimized context generation."""
         stmt = (
