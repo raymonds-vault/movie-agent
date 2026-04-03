@@ -16,6 +16,12 @@ from app.repositories.conversation_repo import ConversationRepository, MessageRe
 from app.schemas.chat import ChatResponse, ConversationDetail, ConversationSummary, MessageSchema
 from app.services.agent.agent import create_movie_agent
 from app.services.agent.cache_verification import verify_semantic_cache_answer
+from app.services.agent.langfuse_flush import flush_langfuse
+from app.services.agent.trace_events import (
+    append_trace_from_astream_event,
+    build_agent_run_config,
+    try_get_observability_trace_id,
+)
 
 import app.core.redis as redis_core
 from app.repositories.redis_repo import RedisMovieRepository
@@ -49,6 +55,29 @@ class ChatService:
         )
         self._redis_repo = RedisMovieRepository(redis_core.redis_client) if redis_core.redis_client else None
         self.SIMILARITY_THRESHOLD = 0.2
+
+    def _agent_state_payload(
+        self,
+        conversation,
+        message: str,
+        history_records,
+        feedback_context: str,
+    ) -> dict:
+        return {
+            "conversation_id": conversation.id,
+            "user_query": message,
+            "raw_history": [{"role": m.role, "content": m.content} for m in history_records],
+            "feedback_context": feedback_context,
+        }
+
+    def _make_langfuse_handler(self):
+        """One CallbackHandler per graph run (do not share across concurrent streams)."""
+        if not self._settings.langfuse_configured:
+            return None
+        from langfuse.langchain import CallbackHandler
+
+        pk = (self._settings.LANGFUSE_PUBLIC_KEY or "").strip()
+        return CallbackHandler(public_key=pk) if pk else CallbackHandler()
 
     @staticmethod
     def _redis_flat_fields_to_doc(fields: list) -> dict[str, str]:
@@ -167,29 +196,42 @@ class ChatService:
         liked_messages = await self._message_repo.get_liked_messages(limit=5)
         feedback_context = " | ".join([m.content for m in liked_messages]) if liked_messages else "None"
 
-        # 5. Invoke the custom Graph agent
+        # 5. Run the graph (astream_events: one pass + Langfuse callback + in-app trace)
+        trace_steps: list[dict] = []
+        reply_text = ""
+        tool_calls_made: list[str] = []
+        lf_handler = self._make_langfuse_handler()
+        callbacks = [lf_handler] if lf_handler else None
+        observability_trace_id: str | None = None
         try:
-            result = await self._agent.ainvoke(
-                {
-                    "conversation_id": conversation.id,
-                    "user_query": message,
-                    "raw_history": [{"role": m.role, "content": m.content} for m in history_records],
-                    "feedback_context": feedback_context,
-                },
-                config={"configurable": {"settings": self._settings}}
+            agent_input = self._agent_state_payload(
+                conversation, message, history_records, feedback_context
+            )
+            run_config = build_agent_run_config(
+                self._settings,
+                conversation_id=str(conversation.id),
+                path="sync",
+                callbacks=callbacks,
             )
 
-            # Extract the final response securely iterating the graph outputs
-            ai_messages = result.get("messages", [])
-            reply_text = ""
-            tool_calls_made = []
+            async for event in self._agent.astream_events(
+                agent_input,
+                config=run_config,
+                version="v2",
+            ):
+                append_trace_from_astream_event(event, trace_steps)
+                kind = event.get("event")
+                if kind == "on_tool_start":
+                    tool_calls_made.append(event.get("name", "unknown"))
+                elif kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, "content") and chunk.content:
+                        reply_text += str(chunk.content)
 
-            for msg in ai_messages:
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        tool_calls_made.append(tc.get("name", "unknown"))
-                if msg.type == "ai" and msg.content:
-                    reply_text = msg.content
+            if lf_handler is not None:
+                flush_langfuse()
+
+            observability_trace_id = try_get_observability_trace_id(lf_handler)
 
             if not reply_text:
                 reply_text = "I'm sorry, I couldn't generate a response. Please try again."
@@ -214,6 +256,8 @@ class ChatService:
             conversation_id=conversation.id,
             reply=reply_text,
             tool_calls_made=tool_calls_made,
+            agent_trace=trace_steps,
+            observability_trace_id=observability_trace_id,
         )
 
     async def stream_message(
@@ -268,25 +312,35 @@ class ChatService:
 
         reply_text = ""
         tool_calls_made = []
+        trace_steps: list[dict] = []
+        lf_handler = self._make_langfuse_handler()
+        callbacks = [lf_handler] if lf_handler else None
 
         try:
             yield json.dumps({"type": "status", "content": "Analyzing context..."})
 
+            agent_input = self._agent_state_payload(
+                conversation, message, history_records, feedback_context
+            )
+            run_config = build_agent_run_config(
+                self._settings,
+                conversation_id=str(conversation.id),
+                path="stream",
+                callbacks=callbacks,
+            )
+
             async for event in self._agent.astream_events(
-                {
-                    "conversation_id": conversation.id,
-                    "user_query": message,
-                    "raw_history": [{"role": m.role, "content": m.content} for m in history_records],
-                    "feedback_context": feedback_context,
-                },
-                config={"configurable": {"settings": self._settings}},
-                version="v2"
+                agent_input,
+                config=run_config,
+                version="v2",
             ):
+                append_trace_from_astream_event(event, trace_steps)
                 kind = event["event"]
                 
                 # Streaming Graph Internal State Transitions
                 if kind == "on_chain_start":
-                    node_name = event.get("name", "")
+                    meta = event.get("metadata") or {}
+                    node_name = meta.get("langgraph_node") or event.get("name", "")
                     if node_name == "summarize":
                         yield json.dumps({"type": "status", "content": "Summarizing history..."})
                     elif node_name == "optimize":
@@ -310,7 +364,19 @@ class ChatService:
                         reply_text += content_str
                         yield json.dumps({"type": "token", "content": content_str})
 
+            if lf_handler is not None:
+                flush_langfuse()
+
             yield json.dumps({"type": "status", "content": ""})
+
+            observability_trace_id = try_get_observability_trace_id(lf_handler)
+            yield json.dumps(
+                {
+                    "type": "agent_trace",
+                    "steps": trace_steps,
+                    "observability_trace_id": observability_trace_id,
+                }
+            )
 
         except Exception as e:
             logger.error(f"Streaming failed: {e}", exc_info=True)

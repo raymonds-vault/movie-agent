@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
+from app.core.langfuse_setup import configure_langfuse
 from app.core.database import init_db, shutdown_db
 from app.core.redis import init_redis, close_redis
 from app.core.exceptions import register_exception_handlers
@@ -31,6 +32,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.core.logging import get_logger
     logger = get_logger(__name__)
 
+    settings = get_settings()
+    configure_langfuse(settings)
+
     logger.info("🚀 Starting Movie Agent API...")
     await init_db()
     logger.info("✅ Database initialized")
@@ -38,7 +42,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_redis()
     logger.info("✅ Redis initialized")
 
-    settings = get_settings()
     logger.info(f"🤖 Ollama model: {settings.OLLAMA_MODEL} @ {settings.OLLAMA_BASE_URL}")
     logger.info(f"🎬 OMDb configured: {settings.omdb_configured}")
 

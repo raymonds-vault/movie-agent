@@ -43,9 +43,31 @@ class Settings(BaseSettings):
     # If True, an LLM must confirm a Redis semantic-cache hit before it is returned.
     SEMANTIC_CACHE_VERIFY: bool = True
 
+    # ── Langfuse (local Docker or cloud) ──────────────
+    # https://langfuse.com/docs — never commit keys.
+    # Default True: if LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set, tracing runs.
+    # Set LANGFUSE_ENABLED=false to disable even when keys are present.
+    LANGFUSE_ENABLED: bool = True
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    # Langfuse UI base URL (local Docker default).
+    LANGFUSE_HOST: str = "http://localhost:3000"
+    # Name of the Langfuse project whose API keys you use (for metadata / docs).
+    LANGFUSE_PROJECT_NAME: str = "movie-agent"
+
     @property
     def omdb_configured(self) -> bool:
         return bool(self.OMDB_API_KEY)
+
+    @property
+    def langfuse_configured(self) -> bool:
+        """True when Langfuse tracing should be active (explicit opt-out + keys)."""
+        if not self.LANGFUSE_ENABLED:
+            return False
+        return bool(
+            (self.LANGFUSE_PUBLIC_KEY or "").strip()
+            and (self.LANGFUSE_SECRET_KEY or "").strip()
+        )
 
 
 @lru_cache

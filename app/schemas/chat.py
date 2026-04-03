@@ -37,6 +37,14 @@ class ChatResponse(BaseModel):
     conversation_id: str
     reply: str
     tool_calls_made: list[str] = Field(default_factory=list)
+    agent_trace: list[dict] | None = Field(
+        default=None,
+        description="Timeline of graph/tool steps for observability (sync HTTP only).",
+    )
+    observability_trace_id: str | None = Field(
+        default=None,
+        description="Langfuse trace id when LANGFUSE_* is configured.",
+    )
 
 
 class ConversationSummary(BaseModel):

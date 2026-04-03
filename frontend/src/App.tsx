@@ -12,19 +12,22 @@ import {
   PlusOutlined,
   RobotOutlined,
   VerticalAlignBottomOutlined,
+  LineChartOutlined,
 } from '@ant-design/icons'
 import { useChatWebSocket } from './hooks/useChatWebSocket'
 import { ChatMessageList } from './components/ChatMessageList'
 import { MessageComposer } from './components/MessageComposer'
+import { AgentTraceDrawer } from './components/AgentTraceDrawer'
 import { buildAntdTheme } from './theme'
 
 const { Header, Content } = Layout
 const { Text } = Typography
 
 function AppShell() {
-  const { messages, sendMessage, stop, newChat, isStreaming } =
+  const { messages, sendMessage, stop, newChat, isStreaming, lastAgentTrace } =
     useChatWebSocket()
 
+  const [traceDrawerOpen, setTraceDrawerOpen] = useState(false)
   const [input, setInput] = useState('')
   const [nearBottom, setNearBottom] = useState(true)
   const [scrollTick, setScrollTick] = useState(0)
@@ -65,6 +68,15 @@ function AppShell() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="small"
+                type="text"
+                icon={<LineChartOutlined className="text-gray-600" />}
+                onClick={() => setTraceDrawerOpen(true)}
+                aria-label="Agent trace"
+              >
+                Trace
+              </Button>
               <Button
                 size="small"
                 icon={<PlusOutlined className="text-xs" />}
@@ -109,6 +121,12 @@ function AppShell() {
             style={{ right: 32, bottom: 32 }}
           />
         ) : null}
+
+        <AgentTraceDrawer
+          open={traceDrawerOpen}
+          onClose={() => setTraceDrawerOpen(false)}
+          trace={lastAgentTrace}
+        />
       </Layout>
     </div>
   )

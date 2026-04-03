@@ -44,7 +44,7 @@ async def summarize_node(state: AgentState, config: RunnableConfig):
     chat_log = "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history])
     prompt = SUMMARIZE_HISTORY_PROMPT.format(chat_history=chat_log)
     
-    res = await llm.ainvoke(prompt)
+    res = await llm.ainvoke(prompt, config=config)
     return {"history_summary": res.content}
 
 
@@ -58,7 +58,7 @@ async def optimize_node(state: AgentState, config: RunnableConfig):
         feedback_context=state.get("feedback_context", "None")
     )
     
-    res = await llm.ainvoke(prompt)
+    res = await llm.ainvoke(prompt, config=config)
     return {"optimized_query": res.content}
 
 
@@ -75,7 +75,7 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     # 3. Native tool/AI execution loop tracking
     msgs.extend(state.get("messages", []))
     
-    res = await llm.ainvoke(msgs)
+    res = await llm.ainvoke(msgs, config=config)
     return {"messages": [res]}
 
 
@@ -94,7 +94,7 @@ async def evaluate_node(state: AgentState, config: RunnableConfig):
         user_query=state.get("user_query", "")
     )
     
-    res = await llm.ainvoke(prompt)
+    res = await llm.ainvoke(prompt, config=config)
     content = str(res.content).strip()
     
     score = 10

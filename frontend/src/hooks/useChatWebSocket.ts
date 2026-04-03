@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import type { ChatMessage, WsInbound } from '../types/chat'
+import type { AgentTracePayload, ChatMessage, WsInbound } from '../types/chat'
 
 function welcomeMessages(): ChatMessage[] {
   return [
@@ -16,6 +16,9 @@ export function useChatWebSocket() {
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages)
   const [isStreaming, setIsStreaming] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
+  const [lastAgentTrace, setLastAgentTrace] = useState<AgentTracePayload | null>(
+    null,
+  )
 
   const conversationIdRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -78,6 +81,7 @@ export function useChatWebSocket() {
         content: 'New chat started! What movie are we exploring?',
       },
     ])
+    setLastAgentTrace(null)
   }, [])
 
   const sendMessage = useCallback(
@@ -131,6 +135,12 @@ export function useChatWebSocket() {
         switch (data.type) {
           case 'info':
             conversationIdRef.current = data.conversation_id
+            break
+          case 'agent_trace':
+            setLastAgentTrace({
+              steps: data.steps,
+              observability_trace_id: data.observability_trace_id,
+            })
             break
           case 'message_id':
             pendingMessageIdRef.current = data.message_id
@@ -204,5 +214,6 @@ export function useChatWebSocket() {
     newChat,
     isStreaming,
     wsConnected,
+    lastAgentTrace,
   }
 }
