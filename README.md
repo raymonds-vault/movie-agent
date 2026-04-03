@@ -12,10 +12,10 @@ This README documents:
 ## Product Screenshots
 
 ### App UI (CinemaBot)
-![CinemaBot UI](/home/raymond/.cursor/projects/home-raymond-Desktop-coding-ai-movie-agent/assets/Screenshot_from_2026-04-03_14-51-24-9aa84382-099a-4ce4-b3ec-afd1b040f4e6.png)
+![CinemaBot UI](docs/images/cinemabot-ui.png)
 
 ### Langfuse Trace Graph + Inputs/Outputs
-![Langfuse Trace](/home/raymond/.cursor/projects/home-raymond-Desktop-coding-ai-movie-agent/assets/Screenshot_from_2026-04-03_14-51-31-db39af2e-fc53-491f-8f6e-90a62c0aca38.png)
+![Langfuse Trace](docs/images/langfuse-trace.png)
 
 ## Overall System Design
 

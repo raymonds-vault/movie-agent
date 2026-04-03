@@ -54,18 +54,12 @@ def create_llm_for_step(settings: Settings, step: str, *, use_fallback: bool = F
 def _research_transcript(messages: list[BaseMessage]) -> str:
     lines: list[str] = []
     for m in messages:
-        if isinstance(m, SystemMessage):
-            continue
-        if isinstance(m, HumanMessage):
-            lines.append(f"Human:\n{m.content}")
-        elif isinstance(m, AIMessage):
-            chunk = f"Assistant:\n{m.content or ''}"
-            if getattr(m, "tool_calls", None):
-                chunk += f"\n[tool_calls: {len(m.tool_calls)}]"
-            lines.append(chunk)
-        elif isinstance(m, ToolMessage):
-            lines.append(f"Tool ({m.name}):\n{m.content}")
-    return "\n\n---\n\n".join(lines) if lines else "(no research)"
+        # For final synthesis, only expose tool outputs (not internal chain chatter/tool-call metadata).
+        if isinstance(m, ToolMessage):
+            tool_name = m.name or "tool"
+            tool_output = str(m.content or "").strip()
+            lines.append(f"- {tool_name}: {tool_output}")
+    return "\n".join(lines) if lines else "(no tool evidence)"
 
 
 async def context_builder(state: AgentState, config: RunnableConfig):
@@ -130,6 +124,11 @@ async def synthesizer(state: AgentState, config: RunnableConfig):
     human = HumanMessage(
         content=(
             f"Answer using summary + tool evidence.{retry_hint}\n\n"
+            "Important output constraints:\n"
+            "- Return only the final user-facing answer.\n"
+            "- Do NOT mention tool calls, internal chain steps, transcript labels, or debug notes.\n"
+            "- Do NOT print strings like [tool_calls: ...], Tool(...), Assistant:, Human:, or 'let me try again'.\n"
+            "- If earlier info was wrong, present a clean corrected answer directly.\n\n"
             f"--- Summary ---\n{state.get('history_summary', '')}\n\n"
             f"--- Task ---\n{state.get('optimized_prompt', '')}\n\n"
             f"--- User ---\n{state.get('user_query', '')}\n\n"
