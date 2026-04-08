@@ -1,6 +1,6 @@
 # 🎬 Movie Agent
 
-Movie Agent is a local-first AI movie assistant built with FastAPI + LangGraph + Ollama, with Redis semantic cache and Langfuse observability.
+Movie Agent is a **self-hosted** AI movie assistant: **FastAPI** + **LangGraph**, with **OpenAI** for chat and embeddings when `OPENAI_API_KEY` is set (or **Ollama** for fully on-machine inference). **Redis** backs semantic Q&A caching; **Pinecone** (optional) hosts movie vectors for RAG; **Langfuse** traces runs. You run the API and data stores; inference and vector services are **configurable** (cloud APIs or local models).
 
 This README documents:
 - system design and control flow
@@ -27,14 +27,15 @@ Client (React + WS)
       -> ChatService
          -> Redis semantic cache (+ optional LLM verifier)
          -> LangGraph agent pipeline
-             context_builder (conditional summary + optimize)
+             pinecone_context (optional movie RAG from Pinecone)
+             -> context_builder (conditional summary + template/rule task build)
              -> tools_decision (single pass)
-             -> optional tool_executor (ToolNode)
-             -> synthesizer
+             -> optional tool_executor (ToolNode; tools are Pinecone-first + OMDb fallback)
+             -> synthesizer (OpenAI tier 0 or Ollama primary)
              -> eval_gate (rule-first)
              -> optional quality_eval (LLM judge)
-             -> (retry synthesizer with fallback model OR accept)
-         -> persist messages + optional Redis write-back
+             -> retry synthesizer with next OpenAI tier until good-enough / min score / max passes
+         -> persist messages + optional Redis write-back + structured observability logs
       -> Repositories (SQLAlchemy async/MySQL)
 ```
 
@@ -55,19 +56,21 @@ Client (React + WS)
    - if acceptable: return cached answer immediately
    - else: continue to graph
 5. Graph executes:
-   - context builder (summary only when needed + prompt optimization)
-   - single-pass tool decision + optional tool execution
-   - synthesize user-facing response
+   - **Pinecone** retrieval into `retrieved_movie_context` (skipped if not configured)
+   - context builder (summary only when needed + **template/rule** optimized task text, not an LLM “optimizer”)
+   - single-pass tool decision + optional tool execution (**tools** query Pinecone first, then **OMDb**, and upsert into Pinecone when possible)
+   - synthesize user-facing response (**OpenAI** chat tiers when configured)
    - fast rule-based eval gate
    - conditional LLM quality evaluation only on low-confidence cases
-   - if low quality and retries remain: regenerate with fallback model
-6. Final response is persisted and streamed to UI.
+   - if quality is below **`QUALITY_MIN_SCORE`** and retries remain: **escalate** to the next model tier (see `OPENAI_CHAT_MODEL_TIERS`) until **`QUALITY_GOOD_ENOUGH`**, min score, or **`MAX_SYNTHESIS_PASSES`**
+6. Final response is persisted and streamed to UI. Structured logs include **`retrieval_score`**, **`tool_used`**, **`eval_score`**, **`retry_count`**, and a rolling **escalation rate**.
 7. Response can be regenerated from UI (same last user message, same conversation).
 
 ## Control Flow (Graph)
 
 ```text
 START
+  -> pinecone_context
   -> context_builder
   -> tools_decision
       -> if tool call exists: tool_executor -> synthesizer
@@ -75,17 +78,25 @@ START
   -> eval_gate
       -> if rule pass: END
       -> else: quality_eval
-          -> if score >= QUALITY_MIN_SCORE: END
-          -> else if synthesis_pass_count < MAX_SYNTHESIS_PASSES: synthesizer
+          -> if score >= QUALITY_GOOD_ENOUGH: END
+          -> else if score >= QUALITY_MIN_SCORE: END
+          -> else if synthesis_pass_count < MAX_SYNTHESIS_PASSES: synthesizer (next tier)
           -> else: END
 ```
 
+When **`OPENAI_API_KEY`** is unset, the graph still runs using **Ollama** for chat; **Pinecone** RAG requires OpenAI embeddings and a configured index.
+
 ## Technical Reference: Agent Nodes
+
+### `pinecone_context(state, config)`
+- File: `app/services/agent/agent.py`
+- Embeds the user query (and history hint) with **OpenAI** embeddings and queries **Pinecone** for top movie chunks.
+- Writes `retrieved_movie_context` and `retrieval_score` (best score after dedupe). No-op when Pinecone/OpenAI is not configured.
 
 ### `context_builder(state, config)`
 - File: `app/services/agent/agent.py`
-- Optionally summarizes only when history is above threshold.
-- Always emits an optimized task instruction before downstream reasoning.
+- Optionally summarizes only when history is above threshold (same **OpenAI-or-Ollama** stack as other nodes).
+- Builds **`optimized_prompt`** via **`app/services/agent/prompt_optimization.py`** (template + rules; see `OPTIMIZED_TASK_TEMPLATE` in `prompts.py`).
 
 ### `tools_decision(state, config)`
 - Single-pass tool reasoning (`bind_tools`) with no recursive tool loop by default.
@@ -93,8 +104,8 @@ START
 
 ### `tool_executor` (LangGraph `ToolNode`)
 - Executes registered async tools:
-  - `search_movies(query)`
-  - `get_movie_details(imdb_id)`
+  - `search_movies(query)` — **Pinecone** similarity first; on weak/empty hit, **OMDb** search; brief results upserted to Pinecone when available
+  - `get_movie_details(imdb_id)` — **fetch** from Pinecone by id when present; else **OMDb** and upsert
 - Tool outputs are appended as `ToolMessage` into graph state
 
 ### `synthesizer(state, config)`
@@ -102,12 +113,12 @@ START
 - Uses:
   - `MOVIE_AGENT_SYSTEM_PROMPT`
   - `history_summary`
-  - `optimized_prompt`
+  - `optimized_prompt` (includes optional **retrieved movie context**)
   - flattened tool transcript
   - prior `quality_feedback` on retries
-- Retry model behavior:
-  - first pass: `OLLAMA_MODEL`
-  - retry pass: `OLLAMA_SYNTH_FALLBACK_MODEL` or `OLLAMA_CODE_MODEL`
+- Model behavior:
+  - **With OpenAI**: tier **0** on first pass, then higher indices from **`OPENAI_CHAT_MODEL_TIERS`** (comma-separated) on retries (`app/services/agent/llm_factory.py`)
+  - **Without OpenAI**: first pass `OLLAMA_SYNTH_MODEL` / `OLLAMA_MODEL`; retry uses `OLLAMA_SYNTH_FALLBACK_MODEL` or `OLLAMA_CODE_MODEL`
 
 ### `eval_gate(state, config)`
 - Rule-first confidence gate (empty/too-short/missing tool-evidence checks).
@@ -115,21 +126,23 @@ START
 
 ### `quality_eval(state, config)` (conditional)
 - Calls shared helper `evaluate_answer_quality(...)` only after `eval_gate` asks for it
-- Output: `quality_score`, `quality_feedback`
+- Output: `quality_score`, `quality_feedback`, `eval_score`
 - Route rules:
-  - accept if score >= `QUALITY_MIN_SCORE`
-  - retry synth if under threshold and pass count < `MAX_SYNTHESIS_PASSES`
+  - end if score >= **`QUALITY_GOOD_ENOUGH`** (stops expensive escalations)
+  - else end if score >= **`QUALITY_MIN_SCORE`**
+  - else retry synth if pass count < **`MAX_SYNTHESIS_PASSES`**
 
 ## Shared Helper Classes / Functions
 
 ### `ChatService` (`app/services/chat_service.py`)
 - Primary orchestrator for sync and streaming chat
 - Important methods:
-  - `_try_semantic_cache(message)` -> vector lookup + optional verification
+  - `_try_semantic_cache(message)` -> Redis vector lookup + optional verification (**Ollama** embeddings unchanged)
   - `process_message(...)` -> HTTP flow
   - `stream_message(..., regenerate=False)` -> WS streaming flow
   - `_agent_state_payload(...)` -> graph input packaging
   - `_make_langfuse_handler()` -> per-request callback handler
+  - **`log_agent_checkpoint`** (via `app/services/agent/observability.py`) -> per-turn fields: `retrieval_score`, `tool_used`, `eval_score`, `retry_count`; cache path uses `tool_used=cache`
 - Regenerate mode:
   - reuses latest user message from DB
   - skips cache by design
@@ -140,7 +153,7 @@ START
   - cache path
   - graph output
   - regeneration output
-- Uses same model family and deterministic parsing into `(score, reason)`
+- Uses **`create_llm_for_step(..., "quality")`** (OpenAI when configured, else Ollama) and deterministic parsing into `(score, reason)`
 
 ### `MessageRepository` (`app/repositories/conversation_repo.py`)
 - `get_recent_by_conversation(...)` for rolling context
@@ -202,7 +215,9 @@ START
 
 From `requirements.txt`:
 - `fastapi`, `uvicorn` -> API + runtime
-- `langchain`, `langgraph`, `langchain-ollama`, `langchain-community` -> agent pipeline
+- `langchain`, `langgraph`, `langchain-openai`, `langchain-ollama`, `langchain-community` -> agent pipeline
+- `openai` -> OpenAI API (chat + embeddings for Pinecone)
+- `pinecone-client` -> Pinecone vector index (movie RAG)
 - `langfuse` -> observability/tracing
 - `sqlalchemy[asyncio]`, `aiomysql` -> persistence
 - `redis` -> semantic cache storage/search
@@ -210,6 +225,8 @@ From `requirements.txt`:
 - `pydantic-settings` -> environment-driven config
 - `python-dotenv` -> local env loading
 - `firebase-admin` -> verify Firebase ID tokens for auth
+
+Release notes for major behavior changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Persistence Model (Data-Layer-First)
 
@@ -230,33 +247,43 @@ CQRS-style Redis projections:
 
 ## Environment Configuration (Key Runtime Flags)
 
-```bash
-# Base model
-OLLAMA_MODEL=llama3.1
+See [`.env.example`](.env.example) for the full list. Highlights:
 
-# Per-step model routing (optional)
+```bash
+# OpenAI (LangGraph chat + Pinecone embeddings). If unset, Ollama is used for chat.
+OPENAI_API_KEY=
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+# Cheap → expensive; synthesis escalates on low quality
+OPENAI_CHAT_MODEL_TIERS=gpt-4o-mini,gpt-4o
+
+# Pinecone (optional movie RAG). Index dimension must match OPENAI_EMBEDDING_MODEL (e.g. 1536 for text-embedding-3-small).
+PINECONE_API_KEY=
+PINECONE_INDEX_NAME=
+PINECONE_NAMESPACE=movies
+
+# Ollama — Redis semantic cache embeddings + LLM fallback when OpenAI is not configured
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+
+# Per-step Ollama overrides (only when OPENAI_API_KEY is unset)
 OLLAMA_CONTEXT_MODEL=
 OLLAMA_TOOL_DECISION_MODEL=
 OLLAMA_SYNTH_MODEL=
 OLLAMA_QUALITY_MODEL=
-
-# Retry model when quality fails
 OLLAMA_SYNTH_FALLBACK_MODEL=
 OLLAMA_CODE_MODEL=deepseek-coder
 
-# Quality controls
+# Quality: ship when score >= QUALITY_MIN_SCORE; stop escalating at >= QUALITY_GOOD_ENOUGH
 QUALITY_MIN_SCORE=6
+QUALITY_GOOD_ENOUGH=8
 MAX_SYNTHESIS_PASSES=2
 
-# Conditional summary/eval controls
 HISTORY_SUMMARY_MIN_MESSAGES=8
 QUALITY_RULE_MIN_CHARS=40
-
-# Semantic cache verification
 SEMANTIC_CACHE_VERIFY=true
 
 # Firebase (production): service account JSON path or FIREBASE_CREDENTIALS_JSON
-# AUTH_DEV_BYPASS=true skips verification (tests / local only)
 AUTH_ENABLED=true
 AUTH_DEV_BYPASS=false
 FIREBASE_PROJECT_ID=

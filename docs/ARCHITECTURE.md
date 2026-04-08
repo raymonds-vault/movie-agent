@@ -6,7 +6,7 @@ This document describes how the **Movie Agent** repository is organized and how 
 
 ## 1. What this application is
 
-**Movie Agent** is a local-first stack:
+**Movie Agent** is a **self-hosted** application stack (FastAPI, MySQL, Redis) with **configurable inference**: typically **OpenAI** and **Pinecone** in production, or **Ollama**-only for on-machine models. It is not “local-only” end-to-end unless you choose Ollama and skip cloud APIs.
 
 - **Backend**: FastAPI exposes REST + WebSocket chat, persists conversations in **MySQL** (via SQLAlchemy async), uses **Redis** for semantic Q&A cache (embeddings via **Ollama**), optional **Pinecone** for movie-document RAG, and runs a **LangGraph** agent on **OpenAI** when `OPENAI_API_KEY` is set (otherwise **Ollama**).
 - **Observability**: **Langfuse** traces LangChain/LangGraph runs when keys and host are configured.
