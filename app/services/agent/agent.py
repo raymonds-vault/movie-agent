@@ -1,60 +1,28 @@
-"""Latency-optimized LangGraph: context_builder(optional) -> tools_decision(single pass) -> synthesizer -> conditional quality."""
+"""LangGraph: pinecone_context -> context_builder -> tools_decision -> synthesizer -> eval_gate -> quality_eval."""
 
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.config import RunnableConfig
-from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.services.agent.prompts import (
-    MOVIE_AGENT_SYSTEM_PROMPT,
-    OPTIMIZE_PRE_LLM_PROMPT,
-    SUMMARY_HISTORY_PROMPT,
-    TOOLS_PHASE_SYSTEM_PROMPT,
-)
+from app.services.agent.llm_factory import create_llm_for_step, create_llm_for_synth_tier
+from app.services.agent.prompt_optimization import build_optimized_prompt
+from app.services.agent.prompts import MOVIE_AGENT_SYSTEM_PROMPT, SUMMARY_HISTORY_PROMPT, TOOLS_PHASE_SYSTEM_PROMPT
 from app.services.agent.quality import evaluate_answer_quality, should_run_llm_quality_eval
 from app.services.agent.state import AgentState
 from app.services.agent.tools import ALL_TOOLS
+from app.services.pinecone_movie_rag import get_pinecone_movie_rag
 
 logger = get_logger(__name__)
-
-
-def _model_or(default: str, override: str | None) -> str:
-    return (override or "").strip() or default
-
-
-def create_llm_for_step(settings: Settings, step: str, *, use_fallback: bool = False) -> ChatOllama:
-    if step == "context":
-        model = _model_or(settings.OLLAMA_MODEL, settings.OLLAMA_CONTEXT_MODEL)
-        temp = 0.0
-    elif step == "tool_decision":
-        model = _model_or(settings.OLLAMA_MODEL, settings.OLLAMA_TOOL_DECISION_MODEL)
-        temp = 0.0
-    elif step == "quality":
-        model = _model_or(settings.OLLAMA_MODEL, settings.OLLAMA_QUALITY_MODEL)
-        temp = 0.0
-    else:  # synth
-        if use_fallback:
-            model = (
-                (settings.OLLAMA_SYNTH_FALLBACK_MODEL or "").strip()
-                or settings.OLLAMA_CODE_MODEL
-                or settings.OLLAMA_MODEL
-            )
-            temp = 0.15
-        else:
-            model = _model_or(settings.OLLAMA_MODEL, settings.OLLAMA_SYNTH_MODEL)
-            temp = 0.0
-    return ChatOllama(model=model, base_url=settings.OLLAMA_BASE_URL, temperature=temp)
 
 
 def _research_transcript(messages: list[BaseMessage]) -> str:
     lines: list[str] = []
     for m in messages:
-        # For final synthesis, only expose tool outputs (not internal chain chatter/tool-call metadata).
         if isinstance(m, ToolMessage):
             tool_name = m.name or "tool"
             tool_output = str(m.content or "").strip()
@@ -62,8 +30,34 @@ def _research_transcript(messages: list[BaseMessage]) -> str:
     return "\n".join(lines) if lines else "(no tool evidence)"
 
 
+async def pinecone_context(state: AgentState, config: RunnableConfig):
+    """Retrieve movie context from Pinecone (skipped if not configured)."""
+    settings = config.get("configurable", {}).get("settings")
+    rag = get_pinecone_movie_rag(settings)
+    uq = state.get("user_query", "")
+    hist = (state.get("history_summary") or "").strip()
+    raw = state.get("raw_history") or []
+    recent_excerpt = "\n".join(
+        f"{m.get('role', 'user')}: {m.get('content', '')}" for m in raw[-4:]
+    )
+    history_hint = f"{hist}\n{recent_excerpt}".strip()
+
+    if not rag.available:
+        return {
+            "retrieved_movie_context": "",
+            "retrieval_score": None,
+        }
+
+    hits, best = await rag.query_movies(query_text=uq, history_hint=history_hint)
+    ctx = rag.format_context(hits)
+    return {
+        "retrieved_movie_context": ctx,
+        "retrieval_score": best,
+    }
+
+
 async def context_builder(state: AgentState, config: RunnableConfig):
-    """Optional summary + prompt optimization in one node."""
+    """History summary (optional LLM) + template/rule optimized task."""
     settings = config.get("configurable", {}).get("settings")
     existing_summary = (state.get("history_summary") or "").strip()
     raw = state.get("raw_history") or []
@@ -78,18 +72,16 @@ async def context_builder(state: AgentState, config: RunnableConfig):
         res = await llm.ainvoke(SUMMARY_HISTORY_PROMPT.format(chat_turns=chat_turns), config=config)
         summary = (res.content or "").strip() or summary
 
-    llm = create_llm_for_step(settings, "context")
-    optimized = await llm.ainvoke(
-        OPTIMIZE_PRE_LLM_PROMPT.format(
-            history_summary=summary,
-            user_query=state.get("user_query", ""),
-            feedback_context=state.get("feedback_context", "None"),
-        ),
-        config=config,
+    optimized = build_optimized_prompt(
+        user_query=state.get("user_query", ""),
+        history_summary=summary,
+        feedback_context=state.get("feedback_context", "None"),
+        retrieved_movie_context=state.get("retrieved_movie_context", ""),
+        raw_history=raw,
     )
     return {
         "history_summary": summary,
-        "optimized_prompt": (optimized.content or "").strip() or state.get("user_query", ""),
+        "optimized_prompt": optimized,
     }
 
 
@@ -102,7 +94,6 @@ def _tools_human_block(state: AgentState) -> str:
 
 
 async def tools_decision(state: AgentState, config: RunnableConfig):
-    """Single LLM pass: decide zero/one tool calls (no recursive loop)."""
     settings = config.get("configurable", {}).get("settings")
     llm = create_llm_for_step(settings, "tool_decision").bind_tools(ALL_TOOLS)
     msgs: list[BaseMessage] = [
@@ -116,7 +107,8 @@ async def tools_decision(state: AgentState, config: RunnableConfig):
 async def synthesizer(state: AgentState, config: RunnableConfig):
     settings = config.get("configurable", {}).get("settings")
     prev = state.get("synthesis_pass_count", 0)
-    llm = create_llm_for_step(settings, "synth", use_fallback=prev >= 1)
+    tier_idx = max(0, prev)
+    llm = create_llm_for_synth_tier(settings, tier_idx)
     transcript = _research_transcript(list(state.get("messages") or []))
     retry_hint = ""
     if prev >= 1 and state.get("quality_feedback"):
@@ -136,12 +128,19 @@ async def synthesizer(state: AgentState, config: RunnableConfig):
         )
     )
     res = await llm.ainvoke([SystemMessage(content=MOVIE_AGENT_SYSTEM_PROMPT), human], config=config)
-    return {"final_response": str(res.content or "").strip(), "synthesis_pass_count": prev + 1}
+    new_count = prev + 1
+    return {
+        "final_response": str(res.content or "").strip(),
+        "synthesis_pass_count": new_count,
+        "synthesis_model_tier": tier_idx,
+        "retry_count": max(0, new_count - 1),
+    }
 
 
 async def eval_gate(state: AgentState, config: RunnableConfig):
     settings = config.get("configurable", {}).get("settings")
     tools = [m.name for m in (state.get("messages") or []) if isinstance(m, ToolMessage)]
+    tool_used = ",".join(sorted(set(tools))) if tools else "none"
     needs_eval, reason = should_run_llm_quality_eval(
         settings,
         user_query=state.get("user_query", ""),
@@ -149,8 +148,20 @@ async def eval_gate(state: AgentState, config: RunnableConfig):
         tool_calls_made=tools,
     )
     if not needs_eval:
-        return {"quality_score": 10, "quality_feedback": "rule_pass", "quality_needs_eval": False}
-    return {"quality_score": 0, "quality_feedback": reason, "quality_needs_eval": True}
+        return {
+            "quality_score": 10,
+            "quality_feedback": "rule_pass",
+            "quality_needs_eval": False,
+            "tool_used": tool_used,
+            "eval_score": 10,
+        }
+    return {
+        "quality_score": 0,
+        "quality_feedback": reason,
+        "quality_needs_eval": True,
+        "tool_used": tool_used,
+        "eval_score": None,
+    }
 
 
 async def quality_eval(state: AgentState, config: RunnableConfig):
@@ -164,7 +175,11 @@ async def quality_eval(state: AgentState, config: RunnableConfig):
         source="graph",
         run_config=config,
     )
-    return {"quality_score": score, "quality_feedback": reason}
+    return {
+        "quality_score": score,
+        "quality_feedback": reason,
+        "eval_score": score,
+    }
 
 
 def route_after_tools_decision(state: AgentState) -> str:
@@ -183,16 +198,21 @@ def route_after_eval_gate(state: AgentState) -> str:
 
 def create_movie_agent(settings: Settings):
     min_q = settings.QUALITY_MIN_SCORE
+    good_enough = settings.QUALITY_GOOD_ENOUGH
     max_passes = settings.MAX_SYNTHESIS_PASSES
 
     def route_after_quality_eval(state: AgentState) -> str:
-        if state.get("quality_score", 0) >= min_q:
+        score = int(state.get("quality_score") or 0)
+        if score >= good_enough:
             return "end"
-        if state.get("synthesis_pass_count", 0) >= max_passes:
+        if score >= min_q:
+            return "end"
+        if int(state.get("synthesis_pass_count", 0) or 0) >= max_passes:
             return "end"
         return "synthesizer"
 
     graph = StateGraph(AgentState)
+    graph.add_node("pinecone_context", pinecone_context)
     graph.add_node("context_builder", context_builder)
     graph.add_node("tools_decision", tools_decision)
     graph.add_node("tool_executor", ToolNode(ALL_TOOLS))
@@ -200,7 +220,8 @@ def create_movie_agent(settings: Settings):
     graph.add_node("eval_gate", eval_gate)
     graph.add_node("quality_eval", quality_eval)
 
-    graph.add_edge(START, "context_builder")
+    graph.add_edge(START, "pinecone_context")
+    graph.add_edge("pinecone_context", "context_builder")
     graph.add_edge("context_builder", "tools_decision")
     graph.add_conditional_edges(
         "tools_decision",
@@ -220,5 +241,7 @@ def create_movie_agent(settings: Settings):
         {"synthesizer": "synthesizer", "end": END},
     )
 
-    logger.info("Movie Agent LangGraph compiled (context_builder -> tools_decision -> synth -> conditional_eval).")
+    logger.info(
+        "Movie Agent LangGraph compiled (pinecone_context -> context_builder -> tools -> synth -> eval)."
+    )
     return graph.compile()

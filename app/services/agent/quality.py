@@ -3,22 +3,13 @@
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_ollama import ChatOllama
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.services.agent.llm_factory import create_llm_for_step
 from app.services.agent.prompts import QUALITY_EVAL_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
-
-
-def _quality_llm(settings: Settings) -> ChatOllama:
-    model = (settings.OLLAMA_QUALITY_MODEL or "").strip() or settings.OLLAMA_MODEL
-    return ChatOllama(
-        model=model,
-        base_url=settings.OLLAMA_BASE_URL,
-        temperature=0.0,
-    )
 
 
 def should_run_llm_quality_eval(
@@ -59,7 +50,7 @@ async def evaluate_answer_quality(
     if not (draft_response or "").strip():
         return 1, "Empty response"
 
-    llm = _quality_llm(settings)
+    llm = create_llm_for_step(settings, "quality")
     human = HumanMessage(
         content=(
             f"User request:\n{user_query}\n\n"

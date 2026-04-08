@@ -35,6 +35,7 @@ Chat turns:
 {chat_turns}
 """
 
+# Legacy LLM prompt (unused when template+rules optimization is enabled).
 OPTIMIZE_PRE_LLM_PROMPT = """You compress routing context for a movie assistant. Output **one short paragraph** (max ~120 words) that:
 - Restates the user's latest intent clearly (expand vague follow-ups using the summary).
 - States any concrete titles/IDs already known from the summary.
@@ -49,6 +50,24 @@ Liked-message style hints (optional):
 {feedback_context}
 
 Output only the optimized instruction paragraph, no preamble."""
+
+OPTIMIZED_TASK_TEMPLATE = """## Conversation summary
+{history_summary}
+
+## Recent turns (oldest of excerpt first)
+{recent_turns}
+
+## Liked-message style hints
+{feedback_context}
+
+## Retrieved movie context (from vector DB; may be empty)
+{retrieved_movie_context}
+
+## Latest user message
+{user_query}
+
+## Task for the assistant
+Answer the user's request using the summary, retrieved context when relevant, and tools if you need fresh or missing movie facts."""
 
 QUALITY_EVAL_SYSTEM_PROMPT = """You are a strict evaluator for a movie-chat assistant.
 Score how well the draft answers the user's request (facts, relevance, clarity).

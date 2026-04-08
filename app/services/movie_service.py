@@ -3,22 +3,19 @@ Movie service — business logic for direct movie operations.
 Wraps TMDB client with caching and data transformation.
 """
 
-import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
-from langchain_ollama import OllamaEmbeddings
 
 from app.core.config import Settings
 from app.core.exceptions import ExternalAPIException
 from app.core.logging import get_logger
 from app.repositories.movie_repo import MovieRepository
-from app.repositories.redis_repo import RedisMovieRepository
-import app.core.redis as redis_core
 
 from app.schemas.movie import (
     MovieDetail,
     MovieSearchResponse,
     MovieSearchResult,
 )
+from app.services.pinecone_movie_rag import get_pinecone_movie_rag
 from app.utils.omdb_client import OMDbClient
 
 logger = get_logger(__name__)
@@ -98,5 +95,18 @@ class MovieService:
                 "runtime": data.get("runtime"),
             },
         )
+
+        rag = get_pinecone_movie_rag(self._settings)
+        if rag.available:
+            try:
+                await rag.upsert_movie_record(
+                    imdb_id=imdb_id,
+                    title=data["title"],
+                    release_date=str(data.get("release_date") or ""),
+                    genres=data.get("genres") or [],
+                    overview=str(data.get("overview") or ""),
+                )
+            except Exception as e:
+                logger.warning("Pinecone upsert from movie_service failed: %s", e)
 
         return MovieDetail(**data)

@@ -25,7 +25,28 @@ class Settings(BaseSettings):
     OPEN_REACT_BROWSER: bool = True
     REACT_DEV_URL: str = "http://127.0.0.1:5173"
 
-    # ── Ollama ───────────────────────────────────────
+    # ── OpenAI (graph + Pinecone embeddings) ─────────
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Comma-separated synthesis tiers (cheap → expensive). First tier used on initial synth.
+    OPENAI_CHAT_MODEL_TIERS: str = "gpt-4o-mini,gpt-4o"
+    OPENAI_CHAT_MODEL_CONTEXT: str = ""  # blank => first tier
+    OPENAI_CHAT_MODEL_TOOLS: str = ""  # blank => first tier
+    OPENAI_CHAT_MODEL_QUALITY: str = ""  # blank => first tier
+
+    # ── Pinecone (movie RAG; optional) ─────────────────
+    PINECONE_API_KEY: str = ""
+    PINECONE_INDEX_NAME: str = ""
+    PINECONE_NAMESPACE: str = "movies"
+    PINECONE_RETRIEVAL_TOP_K: int = 8
+    # Minimum Pinecone similarity score (0–1) to keep a match; below = weak hit.
+    PINECONE_MIN_SCORE: float = 0.35
+    PINECONE_MAX_UNIQUE_MOVIES: int = 5
+    PINECONE_CONTEXT_MAX_CHARS: int = 4000
+    MOVIE_EMBED_MAX_OVERVIEW_CHARS: int = 1500
+    MOVIE_MAX_CHUNKS_PER_MOVIE: int = 1
+
+    # ── Ollama (Redis embeddings + fallback LLM if no OpenAI key) ──
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     OLLAMA_CODE_MODEL: str = "deepseek-coder"
@@ -52,6 +73,8 @@ class Settings(BaseSettings):
 
     # ── Answer quality (cache + graph + regenerate) ──
     QUALITY_MIN_SCORE: int = 6
+    # At or above: stop model escalation (save cost). Should be >= QUALITY_MIN_SCORE.
+    QUALITY_GOOD_ENOUGH: int = 8
     # Max synthesis runs per request (initial + retries after failed quality).
     MAX_SYNTHESIS_PASSES: int = 2
     # Conditional summarization threshold.
@@ -84,6 +107,21 @@ class Settings(BaseSettings):
     @property
     def omdb_configured(self) -> bool:
         return bool(self.OMDB_API_KEY)
+
+    @property
+    def openai_configured(self) -> bool:
+        return bool((self.OPENAI_API_KEY or "").strip())
+
+    @property
+    def pinecone_configured(self) -> bool:
+        return bool((self.PINECONE_API_KEY or "").strip() and (self.PINECONE_INDEX_NAME or "").strip())
+
+    @property
+    def openai_chat_tiers(self) -> list[str]:
+        raw = (self.OPENAI_CHAT_MODEL_TIERS or "").strip()
+        if not raw:
+            return ["gpt-4o-mini", "gpt-4o"]
+        return [t.strip() for t in raw.split(",") if t.strip()]
 
     @property
     def langfuse_configured(self) -> bool:

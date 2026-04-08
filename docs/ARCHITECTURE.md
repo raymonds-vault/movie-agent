@@ -8,7 +8,7 @@ This document describes how the **Movie Agent** repository is organized and how 
 
 **Movie Agent** is a local-first stack:
 
-- **Backend**: FastAPI exposes REST + WebSocket chat, persists conversations in **MySQL** (via SQLAlchemy async), uses **Redis** for semantic cache and read projections, and runs a **LangGraph** agent on **Ollama**.
+- **Backend**: FastAPI exposes REST + WebSocket chat, persists conversations in **MySQL** (via SQLAlchemy async), uses **Redis** for semantic Q&A cache (embeddings via **Ollama**), optional **Pinecone** for movie-document RAG, and runs a **LangGraph** agent on **OpenAI** when `OPENAI_API_KEY` is set (otherwise **Ollama**).
 - **Observability**: **Langfuse** traces LangChain/LangGraph runs when keys and host are configured.
 - **Frontend**: **Vite + React + TypeScript** SPA (CinemaBot UI) talks to the API and WebSocket; production build can be served from `static/` (see `app/main.py`).
 
@@ -34,7 +34,9 @@ flowchart LR
     Redis[(Redis)]
   end
   subgraph External
-    Ollama[Ollama LLM]
+    OAI[OpenAI LLM]
+    OllamaEmb[Ollama embeddings]
+    Pine[Pinecone RAG]
     OMDb[OMDb API]
     LF[Langfuse]
   end
@@ -44,7 +46,9 @@ flowchart LR
   S --> G
   R --> MySQL
   S --> Redis
-  G --> Ollama
+  S --> Pine
+  G --> OAI
+  S --> OllamaEmb
   S --> OMDb
   G -.->|callbacks| LF
 ```
@@ -82,7 +86,7 @@ sequenceDiagram
     CS->>DB: persist / run analytics
     CS-->>UI: stream tokens / final
   else run agent
-    CS->>Graph: astream_events (Ollama + tools)
+    CS->>Graph: astream_events (OpenAI/Ollama + tools)
     Graph-->>CS: node events + final text
     CS->>DB: messages, agent_runs, steps, etc.
     CS-->>UI: stream + status updates
@@ -91,8 +95,8 @@ sequenceDiagram
 
 **Order of operations (conceptual)**:
 
-1. **Semantic cache** (optional): vector-style lookup in Redis; shared quality gate may accept or reject the cached answer.
-2. **LangGraph**: `context_builder` → `tools_decision` → optional `tool_executor` → `synthesizer` → `eval_gate` → optional `quality_eval` → possible **synthesizer retry** with fallback model.
+1. **Semantic cache** (optional): vector-style lookup in Redis; shared quality gate may accept or reject the cached answer. Structured observability logs: `retrieval_score`, `tool_used`, `eval_score`, `retry_count` (plus rolling escalation rate).
+2. **LangGraph**: `pinecone_context` → `context_builder` (template + rule task build + optional history summary) → `tools_decision` → optional `tool_executor` → `synthesizer` → `eval_gate` → optional `quality_eval` → **synthesizer retries** with higher **OpenAI tier** until `QUALITY_GOOD_ENOUGH`, `QUALITY_MIN_SCORE`, or `MAX_SYNTHESIS_PASSES`.
 3. **Persistence**: conversation messages, `AgentRun` / steps / tool calls / quality / cache audit rows; Redis projections for fast reads.
 
 ---
@@ -199,6 +203,7 @@ Aligned with the implementation in `app/services/agent/agent.py`:
 
 ```text
 START
+  → pinecone_context (optional movie RAG context)
   → context_builder
   → tools_decision
       → if tool call: tool_executor → synthesizer
@@ -206,8 +211,8 @@ START
   → eval_gate
       → if rules pass: END
       → else: quality_eval
-          → if score OK: END
-          → elif retries left: synthesizer (fallback model path)
+          → if score >= QUALITY_GOOD_ENOUGH or >= QUALITY_MIN_SCORE: END
+          → elif retries left: synthesizer (next OpenAI tier)
           → else: END
 ```
 

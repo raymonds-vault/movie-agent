@@ -2,9 +2,8 @@
 LLM verification that a semantic-cache entry is an appropriate answer for the user query.
 """
 
-from langchain_ollama import ChatOllama
-
 from app.core.config import Settings
+from app.services.agent.llm_factory import create_llm_for_step
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -32,11 +31,7 @@ async def verify_semantic_cache_answer(
     if not cached_answer or not cached_answer.strip():
         return False
 
-    llm = ChatOllama(
-        model=settings.OLLAMA_MODEL,
-        base_url=settings.OLLAMA_BASE_URL,
-        temperature=0.0,
-    )
+    llm = create_llm_for_step(settings, "quality")
     prompt = VERIFY_PROMPT.format(
         user_query=user_query.strip(),
         cached_answer=cached_answer.strip(),

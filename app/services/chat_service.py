@@ -26,6 +26,7 @@ from app.services.agent.agent import create_movie_agent
 from app.services.agent.cache_verification import verify_semantic_cache_answer
 from app.services.agent.langfuse_flush import flush_langfuse
 from app.services.agent.quality import evaluate_answer_quality, should_run_llm_quality_eval
+from app.services.agent.observability import log_agent_checkpoint, record_graph_completion
 from app.services.agent.trace_events import (
     append_trace_from_astream_event,
     build_agent_run_config,
@@ -73,6 +74,12 @@ class ChatService:
         )
         self._projection_service = ProjectionService(proj_repo)
         self.SIMILARITY_THRESHOLD = 0.2
+
+    def _primary_llm_label(self) -> str:
+        if self._settings.openai_configured:
+            tiers = self._settings.openai_chat_tiers
+            return tiers[0] if tiers else "gpt-4o-mini"
+        return self._settings.OLLAMA_MODEL
 
     @staticmethod
     def _context_hash(user_query: str, history_summary: str | None, user_scope: str) -> str:
@@ -298,6 +305,36 @@ class ChatService:
                         quality_feedback = str(out.get("quality_feedback") or "")
         return history_summary, optimized_prompt, quality_score, quality_feedback
 
+    @staticmethod
+    def _observability_from_last_chain_output(event: dict[str, Any]) -> dict[str, Any]:
+        """Extract checkpoint fields from a graph node's chain end output."""
+        if event.get("event") != "on_chain_end":
+            return {}
+        out = (event.get("data") or {}).get("output")
+        if not isinstance(out, dict):
+            return {}
+        obs: dict[str, Any] = {}
+        if "retrieval_score" in out:
+            obs["retrieval_score"] = out.get("retrieval_score")
+        if "tool_used" in out:
+            obs["tool_used"] = out.get("tool_used")
+        if "eval_score" in out and out.get("eval_score") is not None:
+            try:
+                obs["eval_score"] = int(out.get("eval_score"))
+            except Exception:
+                obs["eval_score"] = out.get("eval_score")
+        if "retry_count" in out:
+            try:
+                obs["retry_count"] = int(out.get("retry_count") or 0)
+            except Exception:
+                obs["retry_count"] = 0
+        if "quality_score" in out:
+            try:
+                obs["eval_score"] = int(out.get("quality_score"))
+            except Exception:
+                pass
+        return obs
+
     async def process_message(
         self,
         message: str,
@@ -357,7 +394,7 @@ class ChatService:
                 source="cache",
                 score=q_score,
                 reason=reason,
-                model_name=self._settings.OLLAMA_MODEL,
+                model_name=self._primary_llm_label(),
             )
             if q_score >= self._settings.QUALITY_MIN_SCORE:
                 cache_tool_calls = (
@@ -392,6 +429,14 @@ class ChatService:
                     status="completed",
                     quality_score=q_score,
                     tools=["cache"],
+                )
+                log_agent_checkpoint(
+                    conversation_id=str(conversation.id),
+                    run_id=str(cache_run.id),
+                    retrieval_score=None,
+                    tool_used="cache",
+                    eval_score=q_score,
+                    retry_count=0,
                 )
                 return ChatResponse(
                     conversation_id=conversation.id,
@@ -445,6 +490,7 @@ class ChatService:
         last_quality_feedback: str | None = None
         latest_history_summary: str | None = existing_summary
         latest_optimized_prompt: str | None = None
+        last_obs: dict[str, Any] = {}
         try:
             agent_input = self._agent_state_payload(
                 conversation,
@@ -466,6 +512,7 @@ class ChatService:
                 version="v2",
             ):
                 append_trace_from_astream_event(event, trace_steps)
+                last_obs.update(self._observability_from_last_chain_output(event))
                 kind = event.get("event")
                 hs, op, qs, qf = await self._capture_graph_event_for_run(
                     run_id=run.id,
@@ -506,6 +553,17 @@ class ChatService:
             if not reply_text:
                 reply_text = "I'm sorry, I couldn't generate a response. Please try again."
 
+            escalated = int(last_obs.get("retry_count") or 0) > 0
+            record_graph_completion(escalated=escalated)
+            log_agent_checkpoint(
+                conversation_id=str(conversation.id),
+                run_id=str(run.id),
+                retrieval_score=last_obs.get("retrieval_score"),
+                tool_used=last_obs.get("tool_used"),
+                eval_score=last_obs.get("eval_score") if last_obs.get("eval_score") is not None else last_quality_score,
+                retry_count=last_obs.get("retry_count"),
+            )
+
         except Exception as e:
             logger.error(f"Agent invocation failed: {e}", exc_info=True)
             raise AgentException(f"Failed to process your message: {str(e)}")
@@ -534,7 +592,7 @@ class ChatService:
             source="graph",
             score=last_quality_score or 0,
             reason=last_quality_feedback,
-            model_name=self._settings.OLLAMA_MODEL,
+            model_name=self._primary_llm_label(),
         )
         await self._run_repo.finalize_run(
             run.id,
@@ -670,7 +728,7 @@ class ChatService:
                     source="cache",
                     score=q_score,
                     reason=reason,
-                    model_name=self._settings.OLLAMA_MODEL,
+                    model_name=self._primary_llm_label(),
                 )
                 if q_score >= self._settings.QUALITY_MIN_SCORE:
                     cache_tool_calls = (
@@ -700,6 +758,14 @@ class ChatService:
                         status="completed",
                         quality_score=q_score,
                         tools=["cache"],
+                    )
+                    log_agent_checkpoint(
+                        conversation_id=str(conversation.id),
+                        run_id=str(cache_run.id),
+                        retrieval_score=None,
+                        tool_used="cache",
+                        eval_score=q_score,
+                        retry_count=0,
                     )
 
                     yield json.dumps({"type": "status", "content": "Cache hit…"})
@@ -755,6 +821,7 @@ class ChatService:
         last_quality_feedback: str | None = None
         latest_history_summary: str | None = existing_summary
         latest_optimized_prompt: str | None = None
+        last_obs: dict[str, Any] = {}
 
         try:
             yield json.dumps({"type": "status", "content": "Preparing context…"})
@@ -779,11 +846,12 @@ class ChatService:
                 version="v2",
             ):
                 append_trace_from_astream_event(event, trace_steps)
+                last_obs.update(self._observability_from_last_chain_output(event))
                 kind = event["event"]
                 hs, op, qs, qf = await self._capture_graph_event_for_run(
                     run_id=run.id,
                     event=event,
-                    tool_calls_made=tool_calls_made,
+                    tool_calls=tool_calls_made,
                 )
                 if hs is not None:
                     latest_history_summary = hs
@@ -799,7 +867,9 @@ class ChatService:
                     node_name = meta.get("langgraph_node") or event.get("name", "")
                     if node_name == "synthesizer":
                         reply_text = ""
-                    if node_name == "context_builder":
+                    if node_name == "pinecone_context":
+                        yield json.dumps({"type": "status", "content": "Retrieving movie context…"})
+                    elif node_name == "context_builder":
                         yield json.dumps({"type": "status", "content": "Preparing context…"})
                     elif node_name == "tools_decision":
                         yield json.dumps({"type": "status", "content": "Deciding tool call…"})
@@ -827,6 +897,19 @@ class ChatService:
 
             if lf_handler is not None:
                 flush_langfuse()
+
+            escalated = int(last_obs.get("retry_count") or 0) > 0
+            record_graph_completion(escalated=escalated)
+            log_agent_checkpoint(
+                conversation_id=str(conversation.id),
+                run_id=str(run.id),
+                retrieval_score=last_obs.get("retrieval_score"),
+                tool_used=last_obs.get("tool_used"),
+                eval_score=last_obs.get("eval_score")
+                if last_obs.get("eval_score") is not None
+                else last_quality_score,
+                retry_count=last_obs.get("retry_count"),
+            )
 
             yield json.dumps({"type": "status", "content": ""})
 
@@ -879,7 +962,7 @@ class ChatService:
                 source="regenerate" if regenerate else "graph",
                 score=last_quality_score or 0,
                 reason=last_quality_feedback,
-                model_name=self._settings.OLLAMA_MODEL,
+                model_name=self._primary_llm_label(),
             )
             obs_tid = try_get_observability_trace_id(lf_handler)
             await self._run_repo.finalize_run(
