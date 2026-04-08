@@ -10,8 +10,10 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import app.models  # noqa: F401
-from app.models.base import Base
+from app.core.auth import DEV_FIREBASE_UID
 from app.core.config import Settings
+from app.models.base import Base
+from app.repositories.user_repo import UserRepository
 
 
 @pytest.fixture(scope="session")
@@ -32,6 +34,7 @@ def test_settings() -> Settings:
         OLLAMA_BASE_URL="http://localhost:11434",
         OLLAMA_MODEL="llama3.1",
         OMDB_API_KEY="test_key",
+        AUTH_DEV_BYPASS=True,
     )
 
 
@@ -55,3 +58,18 @@ async def db_session(test_settings: Settings) -> AsyncGenerator[AsyncSession, No
         await conn.run_sync(Base.metadata.drop_all)
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def test_user(db_session: AsyncSession):
+    """Single test user for repository tests (matches AUTH_DEV_BYPASS identity)."""
+    repo = UserRepository(db_session)
+    user = await repo.upsert_from_claims(
+        firebase_uid=DEV_FIREBASE_UID,
+        email="test@example.com",
+        display_name="Test User",
+        photo_url=None,
+        email_verified=True,
+    )
+    await db_session.commit()
+    return user

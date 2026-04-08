@@ -12,6 +12,8 @@ import remarkGfm from 'remark-gfm'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChatMessage } from '../types/chat'
 import { submitMessageFeedback } from '../api/feedback'
+import { useAuth } from '../contexts/AuthContext'
+import { authDevBypass } from '../firebase'
 
 const { Text } = Typography
 
@@ -23,6 +25,8 @@ export interface ChatMessageListProps {
   onRegenerate?: () => void
   canRegenerate?: boolean
   lastAssistantId?: string | null
+  /** When set, like/dislike without login opens sign-in (not used with dev bypass). */
+  onRequestSignIn?: () => void
 }
 
 export function ChatMessageList({
@@ -32,8 +36,10 @@ export function ChatMessageList({
   onRegenerate,
   canRegenerate,
   lastAssistantId,
+  onRequestSignIn,
 }: ChatMessageListProps) {
   const { message: antMessage } = App.useApp()
+  const { getIdToken, user } = useAuth()
   const containerRef = useRef<HTMLDivElement>(null)
   const [feedbackVote, setFeedbackVote] = useState<
     Record<string, 'up' | 'down' | undefined>
@@ -59,10 +65,14 @@ export function ChatMessageList({
 
   const onFeedback = useCallback(
     async (messageId: string, isLiked: boolean) => {
+      if (!authDevBypass && !user) {
+        onRequestSignIn?.()
+        return
+      }
       const key = isLiked ? 'up' : 'down'
       setFeedbackVote((prev) => ({ ...prev, [messageId]: key }))
       try {
-        await submitMessageFeedback(messageId, isLiked)
+        await submitMessageFeedback(messageId, isLiked, getIdToken)
       } catch {
         setFeedbackVote((prev) => {
           const next = { ...prev }
@@ -72,7 +82,7 @@ export function ChatMessageList({
         antMessage.error('Could not save feedback')
       }
     },
-    [antMessage],
+    [antMessage, getIdToken, user, onRequestSignIn],
   )
 
   const copyText = useCallback(async (text: string) => {

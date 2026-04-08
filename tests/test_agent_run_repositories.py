@@ -11,11 +11,11 @@ from app.services.chat_service import ChatService
 
 
 @pytest.mark.asyncio
-async def test_agent_run_lifecycle(db_session: AsyncSession):
+async def test_agent_run_lifecycle(db_session: AsyncSession, test_user):
     conv_repo = ConversationRepository(db_session)
     run_repo = AgentRunRepository(db_session)
 
-    conversation = await conv_repo.create(title="Run lifecycle")
+    conversation = await conv_repo.create(user_id=test_user.id, title="Run lifecycle")
     run = await run_repo.create_run(
         conversation_id=conversation.id,
         user_query="hello",
@@ -52,12 +52,12 @@ async def test_agent_run_lifecycle(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_cache_audit_and_summary(db_session: AsyncSession):
+async def test_cache_audit_and_summary(db_session: AsyncSession, test_user):
     conv_repo = ConversationRepository(db_session)
     cache_repo = CacheAuditRepository(db_session)
     summary_repo = ConversationSummaryRepository(db_session)
 
-    conversation = await conv_repo.create(title="Summary test")
+    conversation = await conv_repo.create(user_id=test_user.id, title="Summary test")
     await cache_repo.log_decision(
         query="recommend films",
         decision="hit",

@@ -299,15 +299,22 @@ class ChatService:
         return history_summary, optimized_prompt, quality_score, quality_feedback
 
     async def process_message(
-        self, message: str, conversation_id: str | None = None
+        self,
+        message: str,
+        conversation_id: str | None = None,
+        *,
+        user_id: str | None,
     ) -> ChatResponse:
         if conversation_id:
-            conversation = await self._conversation_repo.get_with_messages(conversation_id)
+            conversation = await self._conversation_repo.get_with_messages(
+                conversation_id, user_id=user_id
+            )
             if not conversation:
                 raise NotFoundException("Conversation", conversation_id)
         else:
             conversation = await self._conversation_repo.create(
-                title=message[:50] + ("..." if len(message) > 50 else "")
+                user_id=user_id,
+                title=message[:50] + ("..." if len(message) > 50 else ""),
             )
             logger.info(f"New conversation created: {conversation.id}")
 
@@ -413,7 +420,12 @@ class ChatService:
         history_records = await self._message_repo.get_conversation_context(
             conversation.id, token_limit=1200
         )
-        liked_messages = await self._message_repo.get_liked_messages(limit=5)
+        if user_id is not None:
+            liked_messages = await self._message_repo.get_liked_messages_for_user(
+                user_id, limit=5
+            )
+        else:
+            liked_messages = []
         feedback_context = " | ".join([m.content for m in liked_messages]) if liked_messages else "None"
 
         run = await self._run_repo.create_run(
@@ -566,6 +578,7 @@ class ChatService:
         message: str | None = None,
         conversation_id: str | None = None,
         *,
+        user_id: str | None,
         regenerate: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
@@ -582,7 +595,9 @@ class ChatService:
                     {"type": "error", "content": "conversation_id is required to regenerate"}
                 )
                 return
-            conversation = await self._conversation_repo.get_with_messages(conversation_id)
+            conversation = await self._conversation_repo.get_with_messages(
+                conversation_id, user_id=user_id
+            )
             if not conversation:
                 yield json.dumps({"type": "error", "content": "Conversation not found"})
                 return
@@ -603,14 +618,15 @@ class ChatService:
             message = message.strip()
             if conversation_id:
                 conversation = await self._conversation_repo.get_with_messages(
-                    conversation_id
+                    conversation_id, user_id=user_id
                 )
                 if not conversation:
                     yield json.dumps({"type": "error", "content": "Conversation not found"})
                     return
             else:
                 conversation = await self._conversation_repo.create(
-                    title=message[:50] + ("..." if len(message) > 50 else "")
+                    user_id=user_id,
+                    title=message[:50] + ("..." if len(message) > 50 else ""),
                 )
 
         yield json.dumps({"type": "info", "conversation_id": conversation.id})
@@ -712,7 +728,12 @@ class ChatService:
         history_records = await self._message_repo.get_conversation_context(
             conversation.id, token_limit=1200
         )
-        liked_messages = await self._message_repo.get_liked_messages(limit=5)
+        if user_id is not None:
+            liked_messages = await self._message_repo.get_liked_messages_for_user(
+                user_id, limit=5
+            )
+        else:
+            liked_messages = []
         feedback_context = (
             " | ".join([m.content for m in liked_messages]) if liked_messages else "None"
         )
@@ -892,8 +913,10 @@ class ChatService:
 
         yield json.dumps({"type": "done"})
 
-    async def get_conversation(self, conversation_id: str) -> ConversationDetail:
-        conversation = await self._conversation_repo.get_with_messages(conversation_id)
+    async def get_conversation(self, conversation_id: str, *, user_id: str | None) -> ConversationDetail:
+        conversation = await self._conversation_repo.get_with_messages(
+            conversation_id, user_id=user_id
+        )
         if not conversation:
             raise NotFoundException("Conversation", conversation_id)
 
@@ -907,9 +930,11 @@ class ChatService:
         )
 
     async def list_conversations(
-        self, offset: int = 0, limit: int = 20
+        self, user_id: str | None, offset: int = 0, limit: int = 20
     ) -> list[ConversationSummary]:
-        conversations = await self._conversation_repo.list_conversations(offset, limit)
+        conversations = await self._conversation_repo.list_conversations(
+            user_id, offset=offset, limit=limit
+        )
         return [
             ConversationSummary(
                 id=c.id,
@@ -920,24 +945,42 @@ class ChatService:
             for c in conversations
         ]
 
-    async def delete_conversation(self, conversation_id: str) -> None:
-        conversation = await self._conversation_repo.get_by_id(conversation_id)
+    async def delete_conversation(self, conversation_id: str, *, user_id: str | None) -> None:
+        conversation = await self._conversation_repo.get_with_messages(
+            conversation_id, user_id=user_id
+        )
         if not conversation:
             raise NotFoundException("Conversation", conversation_id)
         await self._conversation_repo.delete(conversation)
         logger.info(f"Conversation deleted: {conversation_id}")
 
-    async def submit_feedback(self, message_id: str, is_liked: bool):
-        message = await self._message_repo.set_message_feedback(message_id, is_liked)
+    async def submit_feedback(self, message_id: str, is_liked: bool, *, user_id: str):
+        message = await self._message_repo.get_by_id(message_id)
         if not message:
             raise NotFoundException("Message", message_id)
-        return message
+        conv = await self._conversation_repo.get_by_id(message.conversation_id)
+        if not conv or conv.user_id != user_id:
+            raise NotFoundException("Message", message_id)
+        updated = await self._message_repo.set_message_feedback(message_id, is_liked)
+        if not updated:
+            raise NotFoundException("Message", message_id)
+        return updated
 
-    async def get_tool_usage_stats(self, tool_name: str | None = None) -> list[dict]:
-        return await self._run_repo.get_tool_usage_stats(tool_name=tool_name)
+    async def get_tool_usage_stats(
+        self, tool_name: str | None = None, *, user_id: str | None
+    ) -> list[dict]:
+        if user_id is None:
+            return []
+        return await self._run_repo.get_tool_usage_stats(
+            tool_name=tool_name, user_id=user_id
+        )
 
-    async def get_run_failure_breakdown(self) -> list[dict]:
-        return await self._run_repo.get_run_failure_breakdown()
+    async def get_run_failure_breakdown(self, *, user_id: str | None) -> list[dict]:
+        if user_id is None:
+            return []
+        return await self._run_repo.get_run_failure_breakdown(user_id=user_id)
 
-    async def get_cache_decision_stats(self) -> list[dict]:
-        return await self._cache_audit_repo.decision_stats()
+    async def get_cache_decision_stats(self, *, user_id: str | None) -> list[dict]:
+        if user_id is None:
+            return []
+        return await self._cache_audit_repo.decision_stats(user_id=user_id)

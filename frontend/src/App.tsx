@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   App as AntApp,
   Button,
@@ -8,6 +8,7 @@ import {
   Typography,
 } from 'antd'
 import {
+  LoginOutlined,
   MenuOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -18,12 +19,19 @@ import { useChatWebSocket } from './hooks/useChatWebSocket'
 import { ChatMessageList } from './components/ChatMessageList'
 import { MessageComposer } from './components/MessageComposer'
 import { AgentTraceDrawer } from './components/AgentTraceDrawer'
+import { AuthModal } from './components/AuthModal'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { authDevBypass } from './firebase'
 import { buildAntdTheme } from './theme'
 
 const { Header, Content } = Layout
 const { Text } = Typography
 
 function AppShell() {
+  const { getIdToken, logOut, user } = useAuth()
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  const prevUidRef = useRef<string | null>(null)
+
   const {
     messages,
     sendMessage,
@@ -33,7 +41,20 @@ function AppShell() {
     isStreaming,
     lastAgentTrace,
     conversationId,
-  } = useChatWebSocket()
+  } = useChatWebSocket(getIdToken)
+
+  useEffect(() => {
+    if (authDevBypass) return
+    const uid = user?.uid ?? null
+    if (uid === null) {
+      prevUidRef.current = null
+      return
+    }
+    if (!prevUidRef.current && conversationId) {
+      newChat()
+    }
+    prevUidRef.current = uid
+  }, [user, conversationId, newChat])
 
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -74,6 +95,16 @@ function AppShell() {
     setScrollTick((x) => x + 1)
   }, [newChat])
 
+  const handleSignOut = useCallback(async () => {
+    await logOut()
+    newChat()
+  }, [logOut, newChat])
+
+  useEffect(() => {
+    document.documentElement.classList.remove('dark')
+    document.documentElement.style.colorScheme = 'light'
+  }, [])
+
   return (
     <div className="saas-app-shell flex h-dvh min-h-0 w-full flex-col overflow-hidden">
       <Layout className="!flex !h-full !min-h-0 !w-full !flex-col !bg-transparent">
@@ -96,6 +127,21 @@ function AppShell() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {!authDevBypass && user && (
+                <Text type="secondary" className="!mb-0 hidden md:inline text-xs max-w-[140px] truncate">
+                  {user.email}
+                </Text>
+              )}
+              {!authDevBypass && !user ? (
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<LoginOutlined />}
+                  onClick={() => setAuthModalOpen(true)}
+                >
+                  Sign in
+                </Button>
+              ) : null}
               <Button
                 size="small"
                 type="text"
@@ -113,6 +159,11 @@ function AppShell() {
               >
                 New +
               </Button>
+              {!authDevBypass && user ? (
+                <Button size="small" type="default" onClick={() => void handleSignOut()}>
+                  Sign out
+                </Button>
+              ) : null}
             </div>
           </Header>
 
@@ -124,6 +175,7 @@ function AppShell() {
               onRegenerate={regenerate}
               canRegenerate={canRegenerate}
               lastAssistantId={lastAssistantId}
+              onRequestSignIn={() => setAuthModalOpen(true)}
             />
             <div className="saas-web-composer shrink-0 border-t border-pink-100/90 bg-[#fafbfd] px-6 py-4 sm:px-10 lg:px-12">
               <div className="mx-auto w-full max-w-7xl">
@@ -158,22 +210,21 @@ function AppShell() {
           onClose={() => setTraceDrawerOpen(false)}
           trace={lastAgentTrace}
         />
+
+        <AuthModal open={authModalOpen} onClose={() => setAuthModalOpen(false)} />
       </Layout>
     </div>
   )
 }
 
 export default function App() {
-  useEffect(() => {
-    document.documentElement.classList.remove('dark')
-    document.documentElement.style.colorScheme = 'light'
-  }, [])
-
   return (
     <ConfigProvider theme={buildAntdTheme()}>
-      <AntApp>
-        <AppShell />
-      </AntApp>
+      <AuthProvider>
+        <AntApp>
+          <AppShell />
+        </AntApp>
+      </AuthProvider>
     </ConfigProvider>
   )
 }

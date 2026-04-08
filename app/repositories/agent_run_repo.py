@@ -7,6 +7,7 @@ from __future__ import annotations
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.conversation import Conversation
 from app.models.agent_run import (
     AgentRun,
     AgentRunStep,
@@ -147,19 +148,39 @@ class AgentRunRepository(BaseRepository[AgentRun]):
         return row
 
     async def get_tool_usage_stats(
-        self, tool_name: str | None = None, limit: int = 50
+        self,
+        tool_name: str | None = None,
+        limit: int = 50,
+        user_id: str | None = None,
     ) -> list[dict]:
-        stmt = (
-            select(
-                ToolCall.tool_name,
-                func.count(ToolCall.id).label("calls"),
-                func.avg(ToolCall.latency_ms).label("avg_latency_ms"),
-                func.sum(case((ToolCall.success == True, 1), else_=0)).label("success_count"),  # noqa: E712
+        if user_id:
+            stmt = (
+                select(
+                    ToolCall.tool_name,
+                    func.count(ToolCall.id).label("calls"),
+                    func.avg(ToolCall.latency_ms).label("avg_latency_ms"),
+                    func.sum(case((ToolCall.success == True, 1), else_=0)).label("success_count"),  # noqa: E712
+                )
+                .select_from(ToolCall)
+                .join(AgentRun, ToolCall.run_id == AgentRun.id)
+                .join(Conversation, AgentRun.conversation_id == Conversation.id)
+                .where(Conversation.user_id == user_id)
+                .group_by(ToolCall.tool_name)
+                .order_by(desc("calls"))
+                .limit(limit)
             )
-            .group_by(ToolCall.tool_name)
-            .order_by(desc("calls"))
-            .limit(limit)
-        )
+        else:
+            stmt = (
+                select(
+                    ToolCall.tool_name,
+                    func.count(ToolCall.id).label("calls"),
+                    func.avg(ToolCall.latency_ms).label("avg_latency_ms"),
+                    func.sum(case((ToolCall.success == True, 1), else_=0)).label("success_count"),  # noqa: E712
+                )
+                .group_by(ToolCall.tool_name)
+                .order_by(desc("calls"))
+                .limit(limit)
+            )
         if tool_name:
             stmt = stmt.where(ToolCall.tool_name == tool_name)
         result = await self._session.execute(stmt)
@@ -175,13 +196,27 @@ class AgentRunRepository(BaseRepository[AgentRun]):
             )
         return rows
 
-    async def get_run_failure_breakdown(self, limit: int = 200) -> list[dict]:
-        stmt = (
-            select(AgentRunStep.node_name, AgentRunStep.status, func.count(AgentRunStep.id))
-            .group_by(AgentRunStep.node_name, AgentRunStep.status)
-            .order_by(desc(func.count(AgentRunStep.id)))
-            .limit(limit)
-        )
+    async def get_run_failure_breakdown(
+        self, limit: int = 200, user_id: str | None = None
+    ) -> list[dict]:
+        if user_id:
+            stmt = (
+                select(AgentRunStep.node_name, AgentRunStep.status, func.count(AgentRunStep.id))
+                .select_from(AgentRunStep)
+                .join(AgentRun, AgentRunStep.run_id == AgentRun.id)
+                .join(Conversation, AgentRun.conversation_id == Conversation.id)
+                .where(Conversation.user_id == user_id)
+                .group_by(AgentRunStep.node_name, AgentRunStep.status)
+                .order_by(desc(func.count(AgentRunStep.id)))
+                .limit(limit)
+            )
+        else:
+            stmt = (
+                select(AgentRunStep.node_name, AgentRunStep.status, func.count(AgentRunStep.id))
+                .group_by(AgentRunStep.node_name, AgentRunStep.status)
+                .order_by(desc(func.count(AgentRunStep.id)))
+                .limit(limit)
+            )
         result = await self._session.execute(stmt)
         return [
             {"node_name": n, "status": s, "count": int(c)}
@@ -216,12 +251,22 @@ class CacheAuditRepository(BaseRepository[CacheDecisionAudit]):
             cache_key=cache_key,
         )
 
-    async def decision_stats(self) -> list[dict]:
-        stmt = (
-            select(CacheDecisionAudit.decision, func.count(CacheDecisionAudit.id))
-            .group_by(CacheDecisionAudit.decision)
-            .order_by(desc(func.count(CacheDecisionAudit.id)))
-        )
+    async def decision_stats(self, user_id: str | None = None) -> list[dict]:
+        if user_id:
+            stmt = (
+                select(CacheDecisionAudit.decision, func.count(CacheDecisionAudit.id))
+                .select_from(CacheDecisionAudit)
+                .join(Conversation, CacheDecisionAudit.conversation_id == Conversation.id)
+                .where(Conversation.user_id == user_id)
+                .group_by(CacheDecisionAudit.decision)
+                .order_by(desc(func.count(CacheDecisionAudit.id)))
+            )
+        else:
+            stmt = (
+                select(CacheDecisionAudit.decision, func.count(CacheDecisionAudit.id))
+                .group_by(CacheDecisionAudit.decision)
+                .order_by(desc(func.count(CacheDecisionAudit.id)))
+            )
         result = await self._session.execute(stmt)
         return [{"decision": d, "count": int(c)} for d, c in result.all()]
 

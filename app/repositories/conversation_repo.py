@@ -17,25 +17,38 @@ class ConversationRepository(BaseRepository[Conversation]):
     def __init__(self, session: AsyncSession):
         super().__init__(Conversation, session)
 
-    async def get_with_messages(self, conversation_id: str) -> Conversation | None:
+    async def get_with_messages(
+        self, conversation_id: str, *, user_id: str | None = None
+    ) -> Conversation | None:
         """Fetch a conversation with all its messages eagerly loaded."""
         stmt = (
             select(Conversation)
             .options(selectinload(Conversation.messages))
             .where(Conversation.id == conversation_id)
         )
+        if user_id is not None:
+            stmt = stmt.where(Conversation.user_id == user_id)
+        else:
+            stmt = stmt.where(Conversation.user_id.is_(None))
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def list_conversations(
-        self, offset: int = 0, limit: int = 20
+        self, user_id: str | None, offset: int = 0, limit: int = 20
     ) -> list[Conversation]:
-        """List conversations ordered by most recent first."""
-        return await self.get_all(
-            offset=offset,
-            limit=limit,
-            order_by=Conversation.created_at.desc(),
+        """List conversations for a user, most recent first. ``user_id`` None returns []."""
+        if user_id is None:
+            return []
+        stmt = (
+            select(Conversation)
+            .options(selectinload(Conversation.messages))
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+            .offset(offset)
+            .limit(limit)
         )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
 
 class MessageRepository(BaseRepository[Message]):
@@ -51,7 +64,7 @@ class MessageRepository(BaseRepository[Message]):
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
+            .order_by(Message.created_at.asc(), Message.id.asc())
             .limit(limit)
         )
         result = await self._session.execute(stmt)
@@ -64,7 +77,7 @@ class MessageRepository(BaseRepository[Message]):
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(limit)
         )
         result = await self._session.execute(stmt)
@@ -130,7 +143,19 @@ class MessageRepository(BaseRepository[Message]):
         """Fetch historically liked messages for optimized context generation."""
         stmt = (
             select(Message)
-            .where(Message.is_liked == True)
+            .where(Message.is_liked == True)  # noqa: E712
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_liked_messages_for_user(self, user_id: str, limit: int = 10) -> list[Message]:
+        """Liked messages scoped to a user's conversations."""
+        stmt = (
+            select(Message)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Message.is_liked == True, Conversation.user_id == user_id)  # noqa: E712
             .order_by(Message.created_at.desc())
             .limit(limit)
         )

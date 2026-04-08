@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentTracePayload, ChatMessage, WsInbound } from '../types/chat'
 
 function welcomeMessages(): ChatMessage[] {
@@ -12,7 +12,12 @@ function welcomeMessages(): ChatMessage[] {
   ]
 }
 
-export function useChatWebSocket() {
+export function useChatWebSocket(getIdToken: () => Promise<string | null>) {
+  const getIdTokenRef = useRef(getIdToken)
+  useEffect(() => {
+    getIdTokenRef.current = getIdToken
+  }, [getIdToken])
+
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages)
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
@@ -116,13 +121,17 @@ export function useChatWebSocket() {
       wsRef.current = ws
 
       ws.onopen = () => {
-        setWsConnected(true)
-        ws.send(
-          JSON.stringify({
-            message: text,
-            conversation_id: conversationIdRef.current,
-          }),
-        )
+        void (async () => {
+          setWsConnected(true)
+          const id_token = (await getIdTokenRef.current()) ?? ''
+          ws.send(
+            JSON.stringify({
+              message: text,
+              conversation_id: conversationIdRef.current,
+              id_token,
+            }),
+          )
+        })()
       }
 
       ws.onmessage = (evt) => {
@@ -232,13 +241,17 @@ export function useChatWebSocket() {
     wsRef.current = ws
 
     ws.onopen = () => {
-      setWsConnected(true)
-      ws.send(
-        JSON.stringify({
-          regenerate: true,
-          conversation_id: conversationIdRef.current,
-        }),
-      )
+      void (async () => {
+        setWsConnected(true)
+        const id_token = (await getIdTokenRef.current()) ?? ''
+        ws.send(
+          JSON.stringify({
+            regenerate: true,
+            conversation_id: conversationIdRef.current,
+            id_token,
+          }),
+        )
+      })()
     }
 
     ws.onmessage = (evt) => {

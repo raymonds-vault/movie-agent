@@ -14,6 +14,8 @@ venv
 
 # Environment variables
 .env
+frontend/.env
+.env.local
 
 # Database
 *.db

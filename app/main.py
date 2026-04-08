@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.langfuse_setup import configure_langfuse
+from app.core.firebase_admin import init_firebase
 from app.core.database import init_db, shutdown_db
 from app.core.redis import init_redis, close_redis
 from app.core.exceptions import register_exception_handlers
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     settings = get_settings()
     configure_langfuse(settings)
+    init_firebase(settings)
 
     logger.info("🚀 Starting Movie Agent API...")
     await init_db()
@@ -99,10 +101,12 @@ def create_app() -> FastAPI:
 
     # ── Routers ──────────────────────────────────────
     from app.controllers.health_controller import router as health_router
+    from app.controllers.auth_controller import router as auth_router
     from app.controllers.chat_controller import router as chat_router
     from app.controllers.movie_controller import router as movie_router
 
     app.include_router(health_router)
+    app.include_router(auth_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(movie_router, prefix="/api/v1")
 

@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     # Rule-based quality gate threshold before invoking LLM quality eval.
     QUALITY_RULE_MIN_CHARS: int = 40
 
+    # ── Firebase Auth (backend) ──────────────────────
+    AUTH_ENABLED: bool = True
+    # When True, skips Firebase verification and uses a fixed dev user (tests/local only).
+    AUTH_DEV_BYPASS: bool = False
+    FIREBASE_PROJECT_ID: str = ""
+    # Path to service account JSON, or leave empty to use FIREBASE_CREDENTIALS_JSON env.
+    FIREBASE_CREDENTIALS_PATH: str = ""
+    # Raw JSON string of the Firebase service account (alternative to path).
+    FIREBASE_CREDENTIALS_JSON: str = ""
+
     # ── Langfuse (local Docker or cloud) ──────────────
     # https://langfuse.com/docs — never commit keys.
     # Default True: if LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set, tracing runs.

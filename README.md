@@ -9,6 +9,8 @@ This README documents:
 - packages and runtime dependencies
 - screenshot-backed tracing and UI references
 
+For a **folder tree and architecture overview** (diagrams, layering, request flow), see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Product Screenshots
 
 ### App UI (CinemaBot)
@@ -165,6 +167,18 @@ START
 
 ## API Surface
 
+### Auth (Firebase ID token)
+- **Chat** (`POST /api/v1/chat`, WebSocket `/ws`, and read/list/delete/analytics): **optional** auth. Omit `Authorization` and omit or leave `id_token` empty for anonymous chat; conversations are stored with `user_id` null.
+- **Feedback** (`POST .../feedback`) and **`GET /api/v1/auth/me`**: require `Authorization: Bearer <firebase_id_token>`.
+- WebSocket first JSON may include `id_token`, `message`, `conversation_id`, `regenerate`.
+- Set `AUTH_DEV_BYPASS=true` on the backend and `VITE_AUTH_DEV_BYPASS=true` in the frontend for local development without Firebase (full chat + feedback without real tokens).
+
+**UX**: Users can chat without signing in; like/dislike opens sign-in and only then persists feedback. Feedback is stored only for messages in conversations owned by the signed-in user (not for prior anonymous threads unless you add a “claim” flow later).
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/v1/auth/me` | Current user profile (synced from Firebase claims) |
+
 ### Chat
 | Method | Endpoint | Description |
 |---|---|---|
@@ -173,7 +187,7 @@ START
 | `GET` | `/api/v1/chat/{conversation_id}` | Conversation with messages |
 | `DELETE` | `/api/v1/chat/{conversation_id}` | Delete conversation |
 | `POST` | `/api/v1/chat/message/{message_id}/feedback` | Like/dislike assistant message |
-| `WS` | `/api/v1/chat/ws` | Streaming chat + regenerate (`regenerate: true`) |
+| `WS` | `/api/v1/chat/ws` | Streaming chat; first frame JSON includes `id_token`, `message`, optional `conversation_id`, optional `regenerate` |
 | `GET` | `/api/v1/chat/analytics/tool-usage` | Tool usage and latency aggregates |
 | `GET` | `/api/v1/chat/analytics/run-failures` | Node/step status breakdown |
 | `GET` | `/api/v1/chat/analytics/cache-decisions` | Cache hit/reject/miss stats |
@@ -195,8 +209,12 @@ From `requirements.txt`:
 - `httpx` -> external API clients
 - `pydantic-settings` -> environment-driven config
 - `python-dotenv` -> local env loading
+- `firebase-admin` -> verify Firebase ID tokens for auth
 
 ## Persistence Model (Data-Layer-First)
+
+- `users` -> Firebase-linked accounts (`firebase_uid`, email, profile fields)
+- `conversations` -> `user_id` nullable (`NULL` = anonymous guest thread; scoped list/history only when signed in)
 
 New intelligence tables:
 - `agent_runs` -> one row per request path (`graph`, `cache`, `regenerate`)
@@ -236,6 +254,26 @@ QUALITY_RULE_MIN_CHARS=40
 
 # Semantic cache verification
 SEMANTIC_CACHE_VERIFY=true
+
+# Firebase (production): service account JSON path or FIREBASE_CREDENTIALS_JSON
+# AUTH_DEV_BYPASS=true skips verification (tests / local only)
+AUTH_ENABLED=true
+AUTH_DEV_BYPASS=false
+FIREBASE_PROJECT_ID=
+FIREBASE_CREDENTIALS_PATH=
+```
+
+### Firebase setup (email/password + Google)
+
+1. Create a Firebase project and add a **Web** app; copy the config into `frontend/.env` as `VITE_FIREBASE_*`.
+2. Enable **Email/Password** and **Google** sign-in providers in Authentication.
+3. Add **Authorized domains** (e.g. `localhost`, your production host).
+4. In Project settings → Service accounts, generate a private key JSON and set `FIREBASE_CREDENTIALS_PATH` (or `FIREBASE_CREDENTIALS_JSON`) in the API `.env`. Set `FIREBASE_PROJECT_ID` to match the project.
+5. Existing databases created before `users` / `conversation.user_id` need a manual migration (add tables/column and backfill or start fresh).
+6. To allow **anonymous** chats, `conversations.user_id` must be nullable. Example for MySQL:
+
+```sql
+ALTER TABLE conversations MODIFY COLUMN user_id VARCHAR(36) NULL;
 ```
 
 ## Langfuse Observability

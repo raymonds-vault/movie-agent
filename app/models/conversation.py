@@ -3,10 +3,13 @@ Conversation and Message ORM models.
 Stores chat history for multi-turn conversations.
 """
 
+from __future__ import annotations
+
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
+from app.models.user import User
 
 
 class Conversation(Base, UUIDMixin, TimestampMixin):
@@ -14,9 +17,13 @@ class Conversation(Base, UUIDMixin, TimestampMixin):
 
     __tablename__ = "conversations"
 
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(255), default="New Conversation")
 
     # Relationships
+    user: Mapped["User | None"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",
